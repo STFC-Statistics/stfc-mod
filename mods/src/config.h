@@ -182,6 +182,7 @@ public:
 
   bool       sync_logging;
   bool       sync_debug;
+  bool       sync_write_to_disk;
   int        sync_resolver_cache_ttl;
   SyncConfig sync_options;
 

@@ -367,6 +367,20 @@ static void send_data(SyncConfig::Type type, const std::string& post_data, bool 
     }
   });
 
+  if (Config::Get().sync_write_to_disk) {
+    const std::string filename = STR_FORMAT("community_patch_{}.ndjson", to_string(type));
+    try {
+      std::ofstream file(std::string(File::MakePath(filename, true)), std::ios::out | std::ios::app);
+      if (file.is_open()) {
+        file << post_data << '\n';
+      } else {
+        spdlog::warn("[sync] write_to_disk: failed to open '{}' for writing", filename);
+      }
+    } catch (const std::exception& e) {
+      spdlog::error("[sync] write_to_disk: {}", e.what());
+    }
+  }
+
   for (const auto& target : targets
        | std::views::filter([type](const auto& t) { return t.second.enabled(type); })
        | std::views::keys) {

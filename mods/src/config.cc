@@ -592,6 +592,7 @@ void Config::Load()
 
   this->sync_debug              = get_config_or_default(config, parsed, "sync", "debug", DCS::debug, write_config);
   this->sync_logging            = get_config_or_default(config, parsed, "sync", "logging", DCS::logging, write_config);
+  this->sync_write_to_disk      = get_config_or_default(config, parsed, "sync", "write_to_disk", DCS::write_to_disk, write_config);
   this->sync_resolver_cache_ttl = get_config_or_default(config, parsed, "sync", "resolver_cache_ttl", DCS::resolver_cache_ttl, write_config);
 
   SyncConfig sync_defaults;
