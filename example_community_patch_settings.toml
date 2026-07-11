@@ -227,6 +227,7 @@ uiscalehooks = true
 zoomhooks = true
 loadingscreenhooks = true
 transitionscreenhooks = true
+focussearch = true
 
 #  <[=========================================================================================================================================]>
 #
@@ -302,6 +303,9 @@ select_ship7 = "7"
 
 # See select_timer
 select_ship8 = "8"
+
+# Focus the search input field in the current view
+focus_search = "CTRL-F"
 
 # Subgroup: Experimental
 # ----------------------
@@ -551,9 +555,6 @@ zoom_reset = "="
 # Skip the reveal box animation, and just open the boxes
 always_skip_reveal_sequence = true
 
-# Open the existing bulk-claim selection flyout automatically when Gifts supports it
-auto_open_bulk_claim_flyout = false
-
 # Prevent "escape" from prompting to exit the game
 disable_escape_exit = true
 
@@ -625,6 +626,9 @@ show_station_cargo = true
 
 # This setting is not used
 auto_confirm_discovery = true
+
+# Open the existing bulk-claim selection flyout automatically when Gifts supports it
+auto_open_bulk_claim_flyout = false
 
 #  <[===================================================================]>
 #
