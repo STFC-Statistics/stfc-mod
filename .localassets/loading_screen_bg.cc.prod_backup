@@ -1,0 +1,1240 @@
+#include "config.h"
+#include "errormsg.h"
+
+#include "prime/TransitionManager.h"
+
+#include <il2cpp/il2cpp_helper.h>
+
+#include <spud/detour.h>
+#include <spdlog/spdlog.h>
+
+#if _WIN32
+#include <Windows.h>
+#endif
+
+#include <filesystem>
+#include <fstream>
+#include <vector>
+
+// Embedded fallback image (linked in at build time)
+#include "embedded_loading_image.h"
+
+// ─── Value-type helpers ───────────────────────────────────────────────────────
+// Unity value types are passed differently depending on size under MSVC x64 ABI:
+//   ≤8 bytes (e.g. Vector2)  → passed BY VALUE in a single integer register
+//   >8 bytes (e.g. Vector3, Quaternion, Rect, Color) → passed BY POINTER
+// We match this: Vector2 is passed directly; the rest are passed as pointers to
+// local stack variables.
+struct FakeRect       { float x, y, width, height; };   // 16 bytes — by pointer
+struct FakeVector2    { float x, y; };                  //  8 bytes — by value
+struct FakeVector3    { float x, y, z; };               // 12 bytes — by pointer
+struct FakeColor      { float r, g, b, a; };            // 16 bytes — by pointer
+
+// ─── State ────────────────────────────────────────────────────────────────────
+// The texture is loaded once and reused for every transition.
+// g_bgImageComp caches the BG Image component per screen instance (cleared in Awake).
+// g_ourSprite tracks the sprite ptr we last set so we can detect if the game overwrote it.
+static void* g_customLoadingTexture = nullptr;
+static bool  g_spriteApplied        = false;
+static void* g_bgImageComp          = nullptr;
+static void* g_ourSprite            = nullptr;
+static void* g_bgRectTransform      = nullptr;  // BG's RectTransform (Transform == RectTransform for UI)
+
+// ─── Fade-in state ────────────────────────────────────────────────────────────
+// When the TVC is shown we optionally fade the loading screen in from transparent
+// instead of letting the Unity Animator play the default slide-from-right motion.
+// The CanvasGroup.alpha is driven each frame from CanvasController.Update (which
+// runs after the Animator in Unity's execution order, so our write wins per frame).
+static void* g_tvCanvasGroup      = nullptr;  // CanvasGroup to drive alpha on
+static void* g_tvCanvasController = nullptr;  // matching CanvasController instance
+static void* g_tvPendingCC        = nullptr;  // CC found in TVC.Awake; consumed by CC.Show to identify the right CC
+static float g_fadeStartTime      = -1.0f;    // UnityEngine.Time.unscaledTime at fade-in start (-1 = not active)
+static float g_fadeOutStartTime   = -1.0f;    // fade-out start time (-1 = not active)
+static float g_fadeDuration       = 0.5f;     // fade duration in seconds
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetUnityTime / SetCanvasGroupAlpha — lightweight helpers for the fade
+// ─────────────────────────────────────────────────────────────────────────────
+static float GetUnityTime()
+{
+  static auto time_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Time");
+  static auto fn_get_time = time_helper.GetMethod("get_unscaledTime");
+  if (!fn_get_time) return 0.0f;
+  return reinterpret_cast<float(*)()>(fn_get_time)();
+}
+
+// Resolves CanvasGroup.set_alpha from the object's own vtable at first call.
+// Assembly-agnostic — works regardless of which Unity module owns CanvasGroup.
+static void SetCanvasGroupAlpha(void* canvasGroup, float alpha)
+{
+  if (!canvasGroup) return;
+  static void* fn_set_alpha = nullptr;
+  if (!fn_set_alpha) {
+    auto* obj = reinterpret_cast<Il2CppObject*>(canvasGroup);
+    if (!obj->klass) return;
+    const MethodInfo* mi = il2cpp_class_get_method_from_name(obj->klass, "set_alpha", 1);
+    if (mi) fn_set_alpha = reinterpret_cast<void*>(mi->methodPointer);
+    if (!fn_set_alpha) { spdlog::warn("[LS] CanvasGroup.set_alpha not found"); return; }
+  }
+  reinterpret_cast<void(*)(void*, float)>(fn_set_alpha)(canvasGroup, alpha);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ReadIl2CppString
+//   Copies the UTF-16 characters of an Il2CppString into a plain ASCII buffer.
+//   Layout: [object header 0x10 bytes][int32 length 0x04 bytes][char16_t chars...].
+//   Chars therefore start at offset 0x14.
+// ─────────────────────────────────────────────────────────────────────────────
+static void ReadIl2CppString(void* strObj, char* buf, int bufSize)
+{
+  buf[0] = '\0';
+  if (!strObj || bufSize <= 1) return;
+  const auto* chars = reinterpret_cast<const char16_t*>((ptrdiff_t)strObj + 0x14);
+  int i = 0;
+  for (; i < bufSize - 1 && chars[i]; ++i)
+    buf[i] = static_cast<char>(chars[i]);
+  buf[i] = '\0';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LoadTextureFromData
+//   Creates a Unity Texture2D from raw PNG/JPEG bytes via
+//   ImageConversion.LoadImage.  Returns nullptr on any failure.
+// ─────────────────────────────────────────────────────────────────────────────
+static void* LoadTextureFromData(const std::vector<uint8_t>& data, const char* sourceName)
+{
+  try {
+    if (data.empty()) {
+      spdlog::error("[LS] Empty image data for '{}'", sourceName);
+      return nullptr;
+    }
+
+    static auto texture2d_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Texture2D");
+    if (!texture2d_helper.isValidHelper()) {
+      spdlog::error("[LS] Texture2D class not found");
+      return nullptr;
+    }
+
+    static auto img_conv_helper   = il2cpp_get_class_helper("UnityEngine.ImageConversionModule", "UnityEngine", "ImageConversion");
+    static auto load_image_method = img_conv_helper.GetMethod("LoadImage", 2);
+    if (!load_image_method) {
+      spdlog::error("[LS] ImageConversion.LoadImage not found");
+      return nullptr;
+    }
+
+    // Copy bytes into a managed byte[]
+    static auto byte_helper = il2cpp_get_class_helper("mscorlib", "System", "Byte");
+    Il2CppArray* byte_array = il2cpp_array_new(byte_helper.get_cls(), data.size());
+    if (!byte_array) {
+      spdlog::error("[LS] Failed to allocate managed byte[] ({} bytes)", data.size());
+      return nullptr;
+    }
+    memcpy(((Il2CppArraySize*)byte_array)->vector, data.data(), data.size());
+
+    // Allocate a Texture2D and call its constructor with a 2x2 RGBA32 placeholder.
+    // LoadImage will resize it to match the decoded image.
+    void* texture = il2cpp_object_new(texture2d_helper.get_cls());
+    if (!texture) {
+      spdlog::error("[LS] Failed to allocate Texture2D");
+      return nullptr;
+    }
+    static auto ctor = texture2d_helper.GetMethod(".ctor", 4);
+    if (ctor)
+      reinterpret_cast<void(*)(void*, int, int, int, bool)>(ctor)(texture, 2, 2, 4, false);
+
+    // ImageConversion.LoadImage(texture, bytes, markNonReadable=false)
+    void* load_ok = reinterpret_cast<void*(*)(void*, void*, bool)>(load_image_method)(texture, byte_array, false);
+    if (!load_ok) {
+      spdlog::error("[LS] LoadImage returned false for '{}'", sourceName);
+      return nullptr;
+    }
+
+    static auto get_width  = texture2d_helper.GetMethod("get_width");
+    static auto get_height = texture2d_helper.GetMethod("get_height");
+    int w = get_width  ? reinterpret_cast<int(*)(void*)>(get_width)(texture)  : 0;
+    int h = get_height ? reinterpret_cast<int(*)(void*)>(get_height)(texture) : 0;
+    spdlog::info("[LS] Texture2D loaded from '{}': {}x{}", sourceName, w, h);
+    return texture;
+
+  } catch (...) {
+    spdlog::error("[LS] Exception in LoadTextureFromData for '{}'", sourceName);
+    return nullptr;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EnsureTextureLoaded
+//   Populates g_customLoadingTexture if not already set.
+//   Tries the configured file path first; falls back to the embedded image.
+//   No-op if the texture is already loaded.
+// ─────────────────────────────────────────────────────────────────────────────
+static void EnsureTextureLoaded()
+{
+  if (g_customLoadingTexture) return;
+
+  const auto& cfg = Config::Get();
+  const std::string& imagePath = cfg.loading_screen_image_path;
+
+  std::vector<uint8_t> data;
+  const char* sourceName = nullptr;
+
+  if (!imagePath.empty()) {
+    if (std::filesystem::exists(imagePath)) {
+      std::ifstream file(imagePath, std::ios::binary);
+      if (file.is_open()) {
+        data.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        sourceName = imagePath.c_str();
+        spdlog::info("[LS] Loading custom image from file: {} ({} bytes)", imagePath, data.size());
+      } else {
+        spdlog::warn("[LS] Could not open '{}', falling back to embedded image", imagePath);
+      }
+    } else {
+      spdlog::warn("[LS] Image path '{}' does not exist, falling back to embedded image", imagePath);
+    }
+  }
+
+  if (data.empty()) {
+    data.assign(g_embeddedLoadingImage, g_embeddedLoadingImage + g_embeddedLoadingImage_SIZE);
+    sourceName = g_embeddedLoadingImage_FILENAME;
+    spdlog::info("[LS] Using embedded image: {} ({} bytes)", sourceName, data.size());
+  }
+
+  g_customLoadingTexture = LoadTextureFromData(data, sourceName);
+  if (!g_customLoadingTexture)
+    spdlog::error("[LS] Texture load failed — loading screen background will not be replaced");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ApplyCustomSpriteToBGImage
+//   Walks the TransitionViewController UI hierarchy:
+//     TransitionViewController (MonoBehaviour)
+//       -> BGContainer (child)
+//            -> BG (child[0])  <-- Image component we target
+//   Creates a Sprite from g_customLoadingTexture and assigns it via set_sprite.
+//   Configures the Image for full-screen fill with a white tint.
+//   Sets g_spriteApplied = true on success.
+// ─────────────────────────────────────────────────────────────────────────────
+static void ApplyCustomSpriteToBGImage(void* _this)
+{
+  if (!g_customLoadingTexture) {
+    spdlog::error("[LS] ApplyCustomSpriteToBGImage: texture not loaded");
+    return;
+  }
+
+  try {
+    static auto tv_helper    = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionViewController");
+    static auto mb_helper     = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "MonoBehaviour");
+    static auto go_helper     = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "GameObject");
+    static auto trans_helper  = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Transform");
+    static auto tex_helper    = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Texture2D");
+    static auto sprite_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Sprite");
+    static auto image_helper  = il2cpp_get_class_helper("UnityEngine.UI", "UnityEngine.UI", "Image");
+
+    spdlog::info("[LS] ApplyCustomSpriteToBGImage (_this={}, cached_img={})", _this, g_bgImageComp);
+
+    // Fast path: _staticOverride is a serialized Image* field on TransitionViewController
+    // that points directly to the background Image component. Use it if available.
+    void* imageComp = g_bgImageComp;  // use cached value if already found
+    if (!imageComp) {
+      if (tv_helper.isValidHelper()) {
+        static auto f_static_override = tv_helper.GetField("_staticOverride");
+        if (f_static_override.isValidHelper()) {
+          ptrdiff_t off = f_static_override.offset();
+          imageComp = *reinterpret_cast<void**>((char*)_this + off);
+          if (imageComp)
+            spdlog::info("[LS] Found imageComp via _staticOverride: {}", imageComp);
+        }
+      }
+    } else {
+      spdlog::info("[LS] Using cached imageComp: {}", imageComp);
+    }
+
+    // Fallback: walk TransitionViewController -> BGContainer -> BG -> Image
+    if (!imageComp) {
+      spdlog::info("[LS] Walking UI hierarchy to find BG Image component");
+      static auto fn_get_gameObject    = mb_helper.GetMethod("get_gameObject");
+      static auto fn_get_transform     = go_helper.GetMethod("get_transform");
+      static auto fn_get_childCount    = trans_helper.GetMethod("get_childCount");
+      static auto fn_get_child         = trans_helper.GetMethod("GetChild");
+      static auto fn_get_go_from_trans = trans_helper.GetMethod("get_gameObject");
+      static auto fn_get_name          = go_helper.GetMethod("get_name");
+      static auto fn_get_component     = go_helper.GetMethod("GetComponent", 1);
+
+      if (!fn_get_gameObject || !fn_get_transform || !fn_get_childCount ||
+          !fn_get_child || !fn_get_go_from_trans || !fn_get_name || !fn_get_component) {
+        spdlog::error("[LS] One or more required Unity methods not found");
+        return;
+      }
+
+      void* go = reinterpret_cast<void*(*)(void*)>(fn_get_gameObject)(_this);
+      if (!go) { spdlog::error("[LS] get_gameObject returned null"); return; }
+
+      void* root = reinterpret_cast<void*(*)(void*)>(fn_get_transform)(go);
+      if (!root) { spdlog::error("[LS] get_transform returned null"); return; }
+
+      // Walk children of the root transform looking for "BGContainer".
+      int32_t rootChildCount = reinterpret_cast<int32_t(*)(void*)>(fn_get_childCount)(root);
+      void* bgContainerTransform = nullptr;
+      for (int i = 0; i < rootChildCount; ++i) {
+        void* ct  = reinterpret_cast<void*(*)(void*, int32_t)>(fn_get_child)(root, i);
+        if (!ct) continue;
+        void* cgo = reinterpret_cast<void*(*)(void*)>(fn_get_go_from_trans)(ct);
+        if (!cgo) continue;
+        char nameBuf[64] = {};
+        ReadIl2CppString(reinterpret_cast<void*(*)(void*)>(fn_get_name)(cgo), nameBuf, sizeof(nameBuf));
+        if (strcmp(nameBuf, "BGContainer") == 0) {
+          bgContainerTransform = ct;
+          break;
+        }
+      }
+      if (!bgContainerTransform) {
+        spdlog::error("[LS] BGContainer not found in TransitionViewController hierarchy");
+        return;
+      }
+
+      // BGContainer contains a single child "BG" which holds the Image component.
+      int32_t bgChildCount = reinterpret_cast<int32_t(*)(void*)>(fn_get_childCount)(bgContainerTransform);
+      if (bgChildCount == 0) {
+        spdlog::error("[LS] BGContainer has no children");
+        return;
+      }
+
+      void* bgTransform = reinterpret_cast<void*(*)(void*, int32_t)>(fn_get_child)(bgContainerTransform, 0);
+      if (!bgTransform) { spdlog::error("[LS] GetChild(BGContainer, 0) returned null"); return; }
+      g_bgRectTransform = bgTransform;  // UI Transform IS the RectTransform
+
+      void* bgGO = reinterpret_cast<void*(*)(void*)>(fn_get_go_from_trans)(bgTransform);
+      if (!bgGO) { spdlog::error("[LS] get_gameObject(bgTransform) returned null"); return; }
+
+      // Step 3: GetComponent<Image>
+      void* imageType = image_helper.GetType();
+      if (!imageType) { spdlog::error("[LS] Could not get System.Type for Image"); return; }
+
+      imageComp = reinterpret_cast<void*(*)(void*, void*)>(fn_get_component)(bgGO, imageType);
+      if (!imageComp) {
+        spdlog::error("[LS] GetComponent<Image> on BGContainer/BG returned null");
+        return;
+      }
+      spdlog::info("[LS] Found imageComp via hierarchy walk: {}", imageComp);
+    }
+
+    // Cache for subsequent calls (cleared in Awake for each new screen instance)
+    g_bgImageComp = imageComp;
+
+    // Step 4: create Sprite from the custom texture
+    static auto fn_get_width  = tex_helper.GetMethod("get_width");
+    static auto fn_get_height = tex_helper.GetMethod("get_height");
+    int32_t texW = fn_get_width  ? reinterpret_cast<int32_t(*)(void*)>(fn_get_width)(g_customLoadingTexture)  : 792;
+    int32_t texH = fn_get_height ? reinterpret_cast<int32_t(*)(void*)>(fn_get_height)(g_customLoadingTexture) : 450;
+
+    FakeRect    rect {0.0f, 0.0f, (float)texW, (float)texH};
+    FakeVector2 pivot{0.5f, 0.5f};
+
+    // Sprite.Create(Texture2D, Rect, Vector2) — 3-argument overload
+    static auto fn_create_sprite = sprite_helper.GetMethod("Create", 3);
+    if (!fn_create_sprite) { spdlog::error("[LS] Sprite.Create(3) not found"); return; }
+
+    void* sprite = reinterpret_cast<void*(*)(void*, void*, void*)>(fn_create_sprite)(
+        g_customLoadingTexture, &rect, &pivot);
+    if (!sprite) { spdlog::error("[LS] Sprite.Create returned null"); return; }
+
+    // Step 5: assign sprite.
+    // We set BOTH m_OverrideSprite and m_Sprite.
+    // m_OverrideSprite takes rendering priority, but TransitionViewController.AboutToHide
+    // calls set_overrideSprite(null) when all downloads complete, which would normally
+    // reveal the original bundle sprite in m_Sprite.  By also writing our sprite to
+    // m_Sprite, the custom image persists even after AboutToHide clears the override.
+    static auto fn_set_override_sprite = image_helper.GetMethod("set_overrideSprite");
+    static auto fn_set_sprite          = image_helper.GetMethod("set_sprite");
+
+    if (!fn_set_override_sprite && !fn_set_sprite) {
+      spdlog::error("[LS] Neither set_overrideSprite nor set_sprite found");
+      return;
+    }
+    if (fn_set_override_sprite)
+      reinterpret_cast<void(*)(void*, void*)>(fn_set_override_sprite)(imageComp, sprite);
+    if (fn_set_sprite)
+      reinterpret_cast<void(*)(void*, void*)>(fn_set_sprite)(imageComp, sprite);
+
+    spdlog::info("[LS] Sprite assigned ({}) to imageComp={} (set_overrideSprite={}, set_sprite={})",
+                 sprite, imageComp, fn_set_override_sprite != nullptr, fn_set_sprite != nullptr);
+
+    // Store our sprite ptr so hooks can detect if the game overwrites it
+    g_ourSprite = sprite;
+
+    // Force color to opaque white — the game fades the image in via color.a and
+    // it may still be (0,0,0,0) when AboutToShow fires.  Safe to set here because
+    // AboutToShow fires after the canvas is fully initialized (unlike Start).
+    static auto fn_set_color = image_helper.GetMethod("set_color");
+    if (fn_set_color) {
+      FakeColor white{1.0f, 1.0f, 1.0f, 1.0f};
+      reinterpret_cast<void(*)(void*, void*)>(fn_set_color)(imageComp, &white);
+    }
+
+    // Image.Type.Simple (0) — no slicing/tiling
+    static auto fn_set_type = image_helper.GetMethod("set_type");
+    if (fn_set_type) reinterpret_cast<void(*)(void*, int32_t)>(fn_set_type)(imageComp, 0);
+
+    // preserveAspect = false — stretch to fill RectTransform without letterboxing
+    static auto fn_set_preserve_aspect = image_helper.GetMethod("set_preserveAspect");
+    if (fn_set_preserve_aspect) reinterpret_cast<void(*)(void*, bool)>(fn_set_preserve_aspect)(imageComp, false);
+
+    // Dirty the mesh so Unity redraws with the new sprite this frame
+    static auto fn_set_vertices_dirty = image_helper.GetMethod("SetVerticesDirty");
+    if (fn_set_vertices_dirty) reinterpret_cast<void(*)(void*)>(fn_set_vertices_dirty)(imageComp);
+
+    // Step 6: reset the BG RectTransform to fill its parent.
+    // The game intentionally oversizes BG to ~3900x3580 px for parallax bleed.
+    // That stretches our 16:9 image into a near-square rect, causing skew.
+    // Resetting to stretch-fill (anchors 0,0->1,1, sizeDelta 0,0) makes BG
+    // the same size as BGContainer (which fills the screen), so our image
+    // displays at the correct aspect ratio.
+    //
+    // Calling convention note: RectTransform setters take Vector2 BY VALUE.
+    // On x64 Windows an 8-byte struct is passed in a single 64-bit register (RDX).
+    // Cast as void(*)(void*, FakeVector2, void*) — NOT void(*)(void*, void*, void*).
+    if (g_bgRectTransform) {
+      static auto rt_helper2          = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "RectTransform");
+      static auto fn_rt_set_anchor_min = rt_helper2.GetMethod("set_anchorMin");
+      static auto fn_rt_set_anchor_max = rt_helper2.GetMethod("set_anchorMax");
+      static auto fn_rt_set_size_delta = rt_helper2.GetMethod("set_sizeDelta");
+      static auto fn_rt_set_anchored_pos = rt_helper2.GetMethod("set_anchoredPosition");
+
+      if (fn_rt_set_anchor_min && fn_rt_set_anchor_max &&
+          fn_rt_set_size_delta && fn_rt_set_anchored_pos) {
+        // Vector2 = 8 bytes → passed by value in register
+        FakeVector2 zero2{0.0f, 0.0f};
+        FakeVector2 one2 {1.0f, 1.0f};
+        reinterpret_cast<void(*)(void*, FakeVector2, void*)>(fn_rt_set_anchor_min)(g_bgRectTransform, zero2, nullptr);
+        reinterpret_cast<void(*)(void*, FakeVector2, void*)>(fn_rt_set_anchor_max)(g_bgRectTransform, one2,  nullptr);
+        reinterpret_cast<void(*)(void*, FakeVector2, void*)>(fn_rt_set_size_delta)(g_bgRectTransform, zero2, nullptr);
+        reinterpret_cast<void(*)(void*, FakeVector2, void*)>(fn_rt_set_anchored_pos)(g_bgRectTransform, zero2, nullptr);
+      } else {
+        spdlog::warn("[LS] Could not find all RectTransform setters — BG size not reset");
+      }
+
+      // Reset local rotation — the game rotates BG ~30° for a parallax effect.
+      // Vector3 = 12 bytes → passed by pointer under MSVC x64 ABI.
+      static auto fn_set_local_euler = trans_helper.GetMethod("set_localEulerAngles");
+      if (fn_set_local_euler) {
+        FakeVector3 zero3{0.0f, 0.0f, 0.0f};
+        reinterpret_cast<void(*)(void*, void*, void*)>(fn_set_local_euler)(g_bgRectTransform, &zero3, nullptr);
+      } else {
+        spdlog::warn("[LS] set_localEulerAngles not found — rotation not reset");
+      }
+
+      // Reset local scale to (1,1,1) in case the parallax effect also scaled the BG.
+      static auto fn_set_local_scale = trans_helper.GetMethod("set_localScale");
+      if (fn_set_local_scale) {
+        FakeVector3 one3{1.0f, 1.0f, 1.0f};
+        reinterpret_cast<void(*)(void*, void*, void*)>(fn_set_local_scale)(g_bgRectTransform, &one3, nullptr);
+      }
+    }
+
+    g_spriteApplied = true;
+    spdlog::info("[LS] Custom loading screen background applied");
+
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in ApplyCustomSpriteToBGImage: {}", e.what());
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in ApplyCustomSpriteToBGImage");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: TransitionManager.SetLoadingScreen
+//   Fires when the game requests a transition/loading screen.
+//   Pre-loads the texture so it is ready when Awake/Start fires.
+// ─────────────────────────────────────────────────────────────────────────────
+void TransitionManager_SetLoadingScreen_Hook(auto original, void* _this,
+                                             void* status, int32_t type, int32_t messagingType)
+{
+  try {
+    spdlog::info("[LS] TransitionManager::SetLoadingScreen (_this={}, type={})", _this, type);
+    const auto& cfg = Config::Get();
+    if (cfg.loading_screen_transition_enabled || cfg.loading_screen_login_enabled)
+      EnsureTextureLoaded();
+
+    original(_this, status, type, messagingType);
+
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in SetLoadingScreen hook: {}", e.what());
+    original(_this, status, type, messagingType);
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in SetLoadingScreen hook");
+    original(_this, status, type, messagingType);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: TransitionViewController.Awake
+//   Pre-loads the texture and resets g_spriteApplied for the new screen
+//   instance.  The sprite is applied in AboutToShow (after the UI is ready).
+// ─────────────────────────────────────────────────────────────────────────────
+void TransitionViewController_Awake_Hook(auto original, void* _this)
+{
+  original(_this);
+
+  try {
+    spdlog::info("[LS] TVC::Awake (_this={})", _this);
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_transition_enabled) return;
+
+    g_spriteApplied      = false;
+    g_bgImageComp        = nullptr;
+    g_ourSprite          = nullptr;
+    g_bgRectTransform    = nullptr;
+    g_tvCanvasGroup      = nullptr;
+    g_tvCanvasController = nullptr;
+    g_tvPendingCC        = nullptr;
+    g_fadeStartTime      = -1.0f;
+    g_fadeOutStartTime   = -1.0f;
+    EnsureTextureLoaded();
+
+    // Walk the transform hierarchy up to the root GO to find the CanvasController.
+    // TVC is a CHILD of the canvas prefab root; CC lives on the ROOT GO.
+    // We must do this here (before CC.Show fires) so CC.Show can identify the right instance.
+    try {
+      static auto comp_helper  = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Component");
+      static auto tf_helper    = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Transform");
+      static auto go_helper_aw = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "GameObject");
+      static auto cc_helper_aw = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Client.UI", "CanvasController");
+      static auto fn_get_tf    = comp_helper.GetMethod("get_transform");
+      static auto fn_get_root  = tf_helper.GetMethod("get_root");
+      static auto fn_tf_get_go = comp_helper.GetMethod("get_gameObject");
+      static auto fn_get_comp2 = go_helper_aw.GetMethod("GetComponent", 1);
+
+      if (fn_get_tf && fn_get_root && fn_tf_get_go && fn_get_comp2 && cc_helper_aw.isValidHelper()) {
+        void* tf = reinterpret_cast<void*(*)(void*)>(fn_get_tf)(_this);
+        if (tf) {
+          void* rootTf = reinterpret_cast<void*(*)(void*)>(fn_get_root)(tf);
+          if (rootTf) {
+            void* rootGO = reinterpret_cast<void*(*)(void*)>(fn_tf_get_go)(rootTf);
+            if (rootGO) {
+              void* ccType = cc_helper_aw.GetType();
+              if (ccType)
+                g_tvPendingCC = reinterpret_cast<void*(*)(void*, void*)>(fn_get_comp2)(rootGO, ccType);
+            }
+          }
+        }
+      }
+      if (g_tvPendingCC)
+        spdlog::info("[LS] TVC::Awake found parent CC={} (will intercept its Show)", g_tvPendingCC);
+      else
+        spdlog::warn("[LS] TVC::Awake could not find parent CC — slide will not be suppressed");
+    } catch (...) {}
+
+  } catch (...) {}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: TransitionViewController.AboutToShow
+//   PRIMARY hook.  Fired by the game just before the loading screen becomes
+//   visible.  original() is called first (subscribes to download events, etc.),
+//   then we override the sprite.
+//
+//   NOTE: TransitionViewController does NOT override Start() — it only defines
+//   it in the VTable as an inherited MonoBehaviour slot.  Hooking "Start" via
+//   GetMethod would return the base class method and affect all MonoBehaviours.
+//   AboutToShow (vtable slot 28) is the correct per-class lifecycle hook.
+// ─────────────────────────────────────────────────────────────────────────────
+void TransitionViewController_AboutToShow_Hook(auto original, void* _this)
+{
+  original(_this);
+
+  try {
+    spdlog::info("[LS] TVC::AboutToShow (_this={})", _this);
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_transition_enabled) return;
+
+    EnsureTextureLoaded();
+    if (!g_customLoadingTexture) return;
+
+    ApplyCustomSpriteToBGImage(_this);
+    // Fade-in is driven from CanvasController_Show_Hook (which fires before AboutToShow
+    // and has direct access to the CC's root GO where the CanvasGroup lives).
+
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in AboutToShow hook: {}", e.what());
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in AboutToShow hook");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: CanvasController.Show(int desiredEntryPoint, bool instant)
+//   Intercepts every CC show.  When g_tvShowPendingTime was set within the last
+//   second by SetLoadingScreen, this call is the loading screen's CC.Show:
+//     • forces instant=true  → Animator snaps to Visible state, no slide plays
+//     • after original():  finds the CanvasGroup on the CC's root GO, sets
+//       alpha=0 and starts the fade-in timer
+//
+//   The CanvasGroup lives on the CC's root GO (not on TVC's child GO).  We look
+//   for AbstractCanvasGroupRelay._targetGroup first; fall back to a direct
+//   GetComponent<CanvasGroup> on the same GO.
+// ─────────────────────────────────────────────────────────────────────────────
+void CanvasController_Show_Hook(auto original, void* _this, int32_t entryPoint, bool instant, void* method)
+{
+  try {
+    const auto& cfg = Config::Get();
+    if (cfg.loading_screen_transition_enabled && g_tvPendingCC != nullptr && _this == g_tvPendingCC) {
+      g_tvPendingCC        = nullptr;  // consume — one intercept per TVC.Awake
+      g_tvCanvasController = _this;
+      instant              = true;     // suppress the slide-from-right Animator transition
+      spdlog::info("[LS] CC.Show intercepted for loading screen (instant=true forced, cc={})", _this);
+    }
+  } catch (...) {}
+
+  original(_this, entryPoint, instant, method);
+
+  try {
+    if (_this != g_tvCanvasController || !Config::Get().loading_screen_transition_enabled) return;
+
+    // Find the CanvasGroup on the CC's root GO (if not already cached from a
+    // previous show of the same instance).
+    if (!g_tvCanvasGroup) {
+      static auto mb_helper   = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "MonoBehaviour");
+      static auto go_helper   = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "GameObject");
+      static auto acgr_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Client.UI", "AbstractCanvasGroupRelay");
+      static auto f_target    = acgr_helper.GetField("_targetGroup");
+      static auto fn_get_go   = mb_helper.GetMethod("get_gameObject");
+      static auto fn_get_comp = go_helper.GetMethod("GetComponent", 1);
+
+      void* go = (fn_get_go) ? reinterpret_cast<void*(*)(void*)>(fn_get_go)(_this) : nullptr;
+      if (!go) {
+        spdlog::warn("[LS] Fade: CC.get_gameObject returned null");
+      } else {
+        // Try AbstractCanvasGroupRelay._targetGroup (the CC IS the root GO).
+        if (acgr_helper.isValidHelper() && f_target.isValidHelper() && fn_get_comp) {
+          void* relayType = acgr_helper.GetType();
+          if (relayType) {
+            void* relay = reinterpret_cast<void*(*)(void*, void*)>(fn_get_comp)(go, relayType);
+            if (relay)
+              g_tvCanvasGroup = *reinterpret_cast<void**>((char*)relay + f_target.offset());
+          }
+        }
+        // Fallback: CanvasGroup directly on the root GO (try both known assembly names).
+        if (!g_tvCanvasGroup && fn_get_comp) {
+          static auto cg_uimod = il2cpp_get_class_helper("UnityEngine.UIModule", "UnityEngine", "CanvasGroup");
+          if (cg_uimod.isValidHelper()) {
+            void* t2 = cg_uimod.GetType();
+            if (t2) g_tvCanvasGroup = reinterpret_cast<void*(*)(void*, void*)>(fn_get_comp)(go, t2);
+          }
+        }
+        if (!g_tvCanvasGroup && fn_get_comp) {
+          static auto cg_core = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "CanvasGroup");
+          if (cg_core.isValidHelper()) {
+            void* t2 = cg_core.GetType();
+            if (t2) g_tvCanvasGroup = reinterpret_cast<void*(*)(void*, void*)>(fn_get_comp)(go, t2);
+          }
+        }
+        if (g_tvCanvasGroup)
+          spdlog::info("[LS] Fade: CanvasGroup found on CC GO: {}", g_tvCanvasGroup);
+        else
+          spdlog::warn("[LS] Fade: CanvasGroup not found on CC GO {} — no fade", go);
+      }
+    }
+
+    if (g_tvCanvasGroup) {
+      SetCanvasGroupAlpha(g_tvCanvasGroup, 0.0f);  // start fully transparent
+      g_fadeStartTime    = GetUnityTime();
+      g_fadeOutStartTime = -1.0f;
+      spdlog::info("[LS] Fade-in started (cc={}, cg={}, duration={}s)",
+                   g_tvCanvasController, g_tvCanvasGroup, g_fadeDuration);
+    }
+  } catch (...) {}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: CanvasController.Hide
+//   Starts the fade-out when the loading screen is about to hide.
+//   We do NOT force instant=true here — the Animator's hide transition plays
+//   normally (moving the canvas off screen) but the canvas is invisible because
+//   we drive CanvasGroup.alpha from 1→0 in Update, overriding the Animator.
+// ─────────────────────────────────────────────────────────────────────────────
+void CanvasController_Hide_Hook(auto original, void* _this, int32_t exitPoint, bool instant, void* method)
+{
+  try {
+    const auto& cfg = Config::Get();
+    if (cfg.loading_screen_transition_enabled && _this == g_tvCanvasController && g_tvCanvasGroup) {
+      g_fadeStartTime    = -1.0f;          // cancel any in-progress fade-in
+      g_fadeOutStartTime = GetUnityTime();
+      spdlog::info("[LS] Fade-out started");
+    }
+  } catch (...) {}
+
+  original(_this, exitPoint, instant, method);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: CanvasController.Update
+//   Drives both the fade-in and fade-out animations each frame.
+//   Fires after the Animator.Update, so our alpha write wins per frame.
+// ─────────────────────────────────────────────────────────────────────────────
+void CanvasController_Update_Hook(auto original, void* _this)
+{
+  original(_this);
+
+  try {
+    if (!g_tvCanvasGroup) return;
+    if (!g_tvCanvasController || _this != g_tvCanvasController) return;
+
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_transition_enabled) {
+      g_tvCanvasGroup = nullptr; g_fadeStartTime = -1.0f; g_fadeOutStartTime = -1.0f;
+      return;
+    }
+
+    float now = GetUnityTime();
+
+    // Fade-out takes priority over fade-in
+    if (g_fadeOutStartTime >= 0.0f) {
+      float t = (now - g_fadeOutStartTime) / g_fadeDuration;
+      if (t >= 1.0f) {
+        SetCanvasGroupAlpha(g_tvCanvasGroup, 0.0f);
+        g_tvCanvasGroup      = nullptr;
+        g_tvCanvasController = nullptr;
+        g_fadeOutStartTime   = -1.0f;
+        spdlog::info("[LS] Fade-out complete");
+      } else {
+        SetCanvasGroupAlpha(g_tvCanvasGroup, 1.0f - t);
+      }
+      return;
+    }
+
+    // Fade-in
+    if (g_fadeStartTime >= 0.0f) {
+      float t = (now - g_fadeStartTime) / g_fadeDuration;
+      if (t >= 1.0f) {
+        SetCanvasGroupAlpha(g_tvCanvasGroup, 1.0f);
+        g_fadeStartTime = -1.0f;  // done; keep g_tvCanvasGroup for the upcoming fade-out
+        spdlog::info("[LS] Fade-in complete");
+      } else {
+        SetCanvasGroupAlpha(g_tvCanvasGroup, t);
+      }
+    }
+  } catch (...) {}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: TransitionViewController.OnAssetBundleDidBeginDownloadEventCallback
+//   FALLBACK hook.  Fires repeatedly during asset bundle downloads.
+//   Attempts to apply the sprite if the AboutToShow hook did not succeed
+//   (g_spriteApplied == false).  No-op once the sprite is applied.
+// ─────────────────────────────────────────────────────────────────────────────
+void TransitionViewController_OnAssetBundleDidBeginDownload_Hook(auto original, void* _this,
+                                                                 uint16_t ID, bool downloading)
+{
+  original(_this, ID, downloading);
+
+  try {
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_transition_enabled) return;
+    if (g_spriteApplied) return;
+
+    EnsureTextureLoaded();
+    if (!g_customLoadingTexture) return;
+
+    spdlog::info("[LS] OnAssetBundleDidBeginDownload — applying sprite (ID={}, downloading={})", ID, downloading);
+    ApplyCustomSpriteToBGImage(_this);
+
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in OnAssetBundleDidBeginDownload hook: {}", e.what());
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in OnAssetBundleDidBeginDownload hook");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: TransitionViewController.DidAssetBundleDownloadCompleteEvent
+//   Fires after an asset bundle finishes loading.  The game does NOT set the
+//   background sprite here (it only removes the bundle from the progress list).
+//   We keep this hook as a safety net to detect if the game ever overwrites our
+//   sprite via m_OverrideSprite or m_Sprite.
+// ─────────────────────────────────────────────────────────────────────────────
+void TransitionViewController_DidAssetBundleDownloadComplete_Hook(auto original, void* _this,
+                                                                   uint16_t ID, void* error)
+{
+  original(_this, ID, error);
+
+  try {
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_transition_enabled) return;
+
+    EnsureTextureLoaded();
+    if (!g_customLoadingTexture) return;
+
+    // Fast check: if we have a cached Image component and our sprite is still set, skip.
+    if (g_bgImageComp && g_ourSprite) {
+      static auto image_helper     = il2cpp_get_class_helper("UnityEngine.UI", "UnityEngine.UI", "Image");
+      static auto f_m_override     = image_helper.GetField("m_OverrideSprite");
+      static auto f_m_sprite       = image_helper.GetField("m_Sprite");
+      void* curOverride = f_m_override.isValidHelper()
+          ? *reinterpret_cast<void**>((char*)g_bgImageComp + f_m_override.offset()) : nullptr;
+      void* curSprite   = f_m_sprite.isValidHelper()
+          ? *reinterpret_cast<void**>((char*)g_bgImageComp + f_m_sprite.offset())   : nullptr;
+      spdlog::info("[LS] DidAssetBundleDownloadComplete (ID={}) — m_OverrideSprite={} m_Sprite={} g_ourSprite={}",
+                   ID, curOverride, curSprite, g_ourSprite);
+      if (curOverride == g_ourSprite || curSprite == g_ourSprite) {
+        return;
+      }
+    }
+
+    // Our sprite was overwritten — re-apply.
+    g_spriteApplied = false;
+    spdlog::info("[LS] DidAssetBundleDownloadComplete (ID={}) — game changed sprite, re-applying", ID);
+    ApplyCustomSpriteToBGImage(_this);
+
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in DidAssetBundleDownloadComplete hook: {}", e.what());
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in DidAssetBundleDownloadComplete hook");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: TransitionViewController.AboutToHide
+//   Fires when the loading screen is about to hide (all downloads complete,
+//   or the section transition is done).  The game calls
+//   set_overrideSprite(_staticOverride, null) here, which would normally reveal
+//   the original bundle sprite stored in m_Sprite.
+//
+//   With our fix (setting both m_Sprite AND m_OverrideSprite in
+//   ApplyCustomSpriteToBGImage), the custom image persists in m_Sprite after
+//   the override is cleared.  This hook is present for diagnostic logging.
+// ─────────────────────────────────────────────────────────────────────────────
+void TransitionViewController_AboutToHide_Hook(auto original, void* _this)
+{
+  // Log sprite state BEFORE the game calls set_overrideSprite(null)
+  try {
+    if (g_bgImageComp) {
+      static auto image_helper = il2cpp_get_class_helper("UnityEngine.UI", "UnityEngine.UI", "Image");
+      static auto f_m_override = image_helper.GetField("m_OverrideSprite");
+      static auto f_m_sprite   = image_helper.GetField("m_Sprite");
+      void* curOverride = f_m_override.isValidHelper()
+          ? *reinterpret_cast<void**>((char*)g_bgImageComp + f_m_override.offset()) : nullptr;
+      void* curSprite   = f_m_sprite.isValidHelper()
+          ? *reinterpret_cast<void**>((char*)g_bgImageComp + f_m_sprite.offset())   : nullptr;
+      spdlog::info("[LS] TVC::AboutToHide (_this={}) — m_OverrideSprite={} m_Sprite={} g_ourSprite={}",
+                   _this, curOverride, curSprite, g_ourSprite);
+    } else {
+      spdlog::info("[LS] TVC::AboutToHide (_this={}) — no cached imageComp", _this);
+    }
+  } catch (...) {}
+
+  original(_this);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: SlideShowViewController.ShowCurrentSlide
+//   Fires every time the slideshow advances (Awake, NextSlide, Update).
+//   The original calls Image.set_sprite(_image, slide.ImageReference).
+//   We override _image's sprite with our custom texture immediately after.
+//   This covers the initial progress-bar loading screen (LoginSequence /
+//   BulkDownloadViewController scene) which uses SlideShowViewController
+//   for its background — separate from TransitionViewController.
+// ─────────────────────────────────────────────────────────────────────────────
+void SlideShowViewController_ShowCurrentSlide_Hook(auto original, void* _this)
+{
+  original(_this);
+
+  try {
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_transition_enabled) return;
+
+    EnsureTextureLoaded();
+    if (!g_customLoadingTexture) return;
+
+    static auto ssvc_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.SlideShow", "SlideShowViewController");
+    if (!ssvc_helper.isValidHelper()) {
+      spdlog::error("[LS] SlideShow: SlideShowViewController class not found");
+      return;
+    }
+
+    static auto f_image = ssvc_helper.GetField("_image");
+    if (!f_image.isValidHelper()) {
+      spdlog::error("[LS] SlideShow: _image field not found");
+      return;
+    }
+
+    void* imageComp = *reinterpret_cast<void**>((char*)_this + f_image.offset());
+    if (!imageComp) {
+      spdlog::warn("[LS] SlideShow::ShowCurrentSlide (_this={}) — _image is null", _this);
+      return;
+    }
+
+    spdlog::info("[LS] SlideShow::ShowCurrentSlide (_this={}, imageComp={})", _this, imageComp);
+
+    static auto tex_helper    = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Texture2D");
+    static auto sprite_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Sprite");
+    static auto image_helper  = il2cpp_get_class_helper("UnityEngine.UI", "UnityEngine.UI", "Image");
+
+    static auto fn_get_width  = tex_helper.GetMethod("get_width");
+    static auto fn_get_height = tex_helper.GetMethod("get_height");
+    int32_t texW = fn_get_width  ? reinterpret_cast<int32_t(*)(void*)>(fn_get_width)(g_customLoadingTexture)  : 792;
+    int32_t texH = fn_get_height ? reinterpret_cast<int32_t(*)(void*)>(fn_get_height)(g_customLoadingTexture) : 450;
+
+    FakeRect    rect {0.0f, 0.0f, (float)texW, (float)texH};
+    FakeVector2 pivot{0.5f, 0.5f};
+
+    static auto fn_create_sprite = sprite_helper.GetMethod("Create", 3);
+    if (!fn_create_sprite) { spdlog::error("[LS] SlideShow: Sprite.Create(3) not found"); return; }
+
+    void* sprite = reinterpret_cast<void*(*)(void*, void*, void*)>(fn_create_sprite)(
+        g_customLoadingTexture, &rect, &pivot);
+    if (!sprite) { spdlog::error("[LS] SlideShow: Sprite.Create returned null"); return; }
+
+    // Set both m_Sprite and m_OverrideSprite so the custom image survives any
+    // game-side set_overrideSprite(null) calls during the hide phase.
+    static auto fn_set_sprite          = image_helper.GetMethod("set_sprite");
+    static auto fn_set_override_sprite = image_helper.GetMethod("set_overrideSprite");
+    if (fn_set_override_sprite)
+      reinterpret_cast<void(*)(void*, void*)>(fn_set_override_sprite)(imageComp, sprite);
+    if (fn_set_sprite)
+      reinterpret_cast<void(*)(void*, void*)>(fn_set_sprite)(imageComp, sprite);
+
+    static auto fn_set_color = image_helper.GetMethod("set_color");
+    if (fn_set_color) {
+      FakeColor white{1.0f, 1.0f, 1.0f, 1.0f};
+      reinterpret_cast<void(*)(void*, void*)>(fn_set_color)(imageComp, &white);
+    }
+
+    static auto fn_set_type = image_helper.GetMethod("set_type");
+    if (fn_set_type) reinterpret_cast<void(*)(void*, int32_t)>(fn_set_type)(imageComp, 0);
+
+    static auto fn_set_preserve_aspect = image_helper.GetMethod("set_preserveAspect");
+    if (fn_set_preserve_aspect) reinterpret_cast<void(*)(void*, bool)>(fn_set_preserve_aspect)(imageComp, false);
+
+    static auto fn_set_vertices_dirty = image_helper.GetMethod("SetVerticesDirty");
+    if (fn_set_vertices_dirty) reinterpret_cast<void(*)(void*)>(fn_set_vertices_dirty)(imageComp);
+
+    spdlog::info("[LS] SlideShow: custom sprite ({}) applied to imageComp={}", sprite, imageComp);
+
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in ShowCurrentSlide hook: {}", e.what());
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in ShowCurrentSlide hook");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FindLoginBGImage
+//   Searches the transform hierarchy (up to maxDepth levels deep) for a child
+//   whose GameObject name matches a known background identifier ("Background",
+//   "BG", "bg_image", "LoadingBackground") AND has a Unity UI Image component.
+//   If no named match is found, returns the FIRST Image component found in a
+//   depth-first traversal so the login screen is always covered.
+//
+//   Called from LoginSequence_Awake_Hook with the Canvas transform.
+// ─────────────────────────────────────────────────────────────────────────────
+static void* FindLoginBGImage(void* transform, int depth, int maxDepth,
+                               void* fn_get_childCount, void* fn_get_child,
+                               void* fn_get_go_from_trans, void* fn_get_name,
+                               void* fn_get_component, void* imageType,
+                               void** outFirstImage)
+{
+  if (!transform || depth > maxDepth) return nullptr;
+
+  int32_t childCount = reinterpret_cast<int32_t(*)(void*)>(fn_get_childCount)(transform);
+  for (int i = 0; i < childCount; ++i) {
+    void* child = reinterpret_cast<void*(*)(void*, int32_t)>(fn_get_child)(transform, i);
+    if (!child) continue;
+    void* childGO = reinterpret_cast<void*(*)(void*)>(fn_get_go_from_trans)(child);
+    if (!childGO) continue;
+
+    // Try to get an Image component from this child
+    void* img = reinterpret_cast<void*(*)(void*, void*)>(fn_get_component)(childGO, imageType);
+    if (img) {
+      // Record first Image found (fallback if no name match)
+      if (!*outFirstImage) *outFirstImage = img;
+
+      // Check if the name looks like a background element
+      char nameBuf[64] = {};
+      ReadIl2CppString(reinterpret_cast<void*(*)(void*)>(fn_get_name)(childGO), nameBuf, sizeof(nameBuf));
+      if (strcmp(nameBuf, "Background") == 0 || strcmp(nameBuf, "BG") == 0 ||
+          strcmp(nameBuf, "bg_image")   == 0 || strcmp(nameBuf, "LoadingBackground") == 0 ||
+          strcmp(nameBuf, "LoginBG")    == 0 || strcmp(nameBuf, "SplashBG") == 0 ||
+          strcmp(nameBuf, "Image")      == 0) {
+        spdlog::info("[LS] LoginBG: found named Image '{}' at depth {}", nameBuf, depth);
+        return img;
+      }
+    }
+
+    // Recurse
+    void* found = FindLoginBGImage(child, depth + 1, maxDepth,
+                                    fn_get_childCount, fn_get_child,
+                                    fn_get_go_from_trans, fn_get_name,
+                                    fn_get_component, imageType, outFirstImage);
+    if (found) return found;
+  }
+  return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook: LoginSequence.Awake
+//   The LoginSequence scene shows for approximately 10-15 seconds at game boot
+//   while game systems initialise (section 0 progress bar, 0→100%).
+//   Its background is a static Unity Image component in the scene hierarchy —
+//   no C# code sets its sprite at runtime, so there is no set_sprite call to
+//   intercept.  Instead we hook Awake, walk the _mainCanvas hierarchy to find
+//   the background Image, and replace it with our custom texture.
+// ─────────────────────────────────────────────────────────────────────────────
+void LoginSequence_Awake_Hook(auto original, void* _this)
+{
+  original(_this);
+
+  try {
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_login_enabled) return;
+
+    EnsureTextureLoaded();
+    if (!g_customLoadingTexture) return;
+
+    // Resolve helpers (each static var initialised once)
+    static auto ls_helper     = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.Login", "LoginSequence");
+    static auto trans_helper  = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Transform");
+    static auto go_helper     = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "GameObject");
+    static auto comp_helper   = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Component");
+    static auto image_helper  = il2cpp_get_class_helper("UnityEngine.UI",         "UnityEngine.UI", "Image");
+    static auto tex_helper    = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Texture2D");
+    static auto sprite_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Sprite");
+
+    if (!ls_helper.isValidHelper()) {
+      spdlog::error("[LS] LoginBG: LoginSequence class not found");
+      return;
+    }
+
+    // Read _mainCanvas field
+    static auto f_mainCanvas = ls_helper.GetField("_mainCanvas");
+    if (!f_mainCanvas.isValidHelper()) {
+      spdlog::error("[LS] LoginBG: _mainCanvas field not found");
+      return;
+    }
+    void* mainCanvas = *reinterpret_cast<void**>((char*)_this + f_mainCanvas.offset());
+    if (!mainCanvas) {
+      spdlog::warn("[LS] LoginBG: _mainCanvas is null — skipping");
+      return;
+    }
+
+    spdlog::info("[LS] LoginSequence::Awake (_this={}, mainCanvas={})", _this, mainCanvas);
+
+    // Get the Transform of the Canvas component
+    static auto fn_comp_get_transform = comp_helper.GetMethod("get_transform");
+    if (!fn_comp_get_transform) { spdlog::error("[LS] LoginBG: Component.get_transform not found"); return; }
+
+    void* canvasTrans = reinterpret_cast<void*(*)(void*)>(fn_comp_get_transform)(mainCanvas);
+    if (!canvasTrans) { spdlog::error("[LS] LoginBG: Canvas transform is null"); return; }
+
+    // Gather methods needed for hierarchy walk
+    static auto fn_get_childCount    = trans_helper.GetMethod("get_childCount");
+    static auto fn_get_child         = trans_helper.GetMethod("GetChild");
+    static auto fn_get_go_from_trans = trans_helper.GetMethod("get_gameObject");
+    static auto fn_get_name          = go_helper.GetMethod("get_name");
+    static auto fn_get_component     = go_helper.GetMethod("GetComponent", 1);
+
+    if (!fn_get_childCount || !fn_get_child || !fn_get_go_from_trans ||
+        !fn_get_name || !fn_get_component) {
+      spdlog::error("[LS] LoginBG: required Unity methods not found");
+      return;
+    }
+
+    void* imageType = image_helper.GetType();
+    if (!imageType) { spdlog::error("[LS] LoginBG: could not get Image System.Type"); return; }
+
+    // Walk the hierarchy (up to 4 levels deep) looking for the background Image
+    void* firstImage = nullptr;
+    void* bgImage = FindLoginBGImage(canvasTrans, 0, 4,
+                                      fn_get_childCount, fn_get_child,
+                                      fn_get_go_from_trans, fn_get_name,
+                                      fn_get_component, imageType, &firstImage);
+
+    if (!bgImage) {
+      bgImage = firstImage; // fall back to the first Image found anywhere
+      if (bgImage) spdlog::info("[LS] LoginBG: no named BG found — using first Image ({})", bgImage);
+    }
+
+    if (!bgImage) {
+      spdlog::warn("[LS] LoginBG: no Image component found in canvas hierarchy");
+      return;
+    }
+
+    spdlog::info("[LS] LoginBG: replacing Image {} with custom sprite", bgImage);
+
+    // Build a Sprite from the custom texture
+    static auto fn_get_width     = tex_helper.GetMethod("get_width");
+    static auto fn_get_height    = tex_helper.GetMethod("get_height");
+    int32_t texW = fn_get_width  ? reinterpret_cast<int32_t(*)(void*)>(fn_get_width)(g_customLoadingTexture)  : 792;
+    int32_t texH = fn_get_height ? reinterpret_cast<int32_t(*)(void*)>(fn_get_height)(g_customLoadingTexture) : 450;
+
+    FakeRect    rect {0.0f, 0.0f, (float)texW, (float)texH};
+    FakeVector2 pivot{0.5f, 0.5f};
+
+    static auto fn_create_sprite = sprite_helper.GetMethod("Create", 3);
+    if (!fn_create_sprite) { spdlog::error("[LS] LoginBG: Sprite.Create(3) not found"); return; }
+
+    void* sprite = reinterpret_cast<void*(*)(void*, void*, void*)>(fn_create_sprite)(
+        g_customLoadingTexture, &rect, &pivot);
+    if (!sprite) { spdlog::error("[LS] LoginBG: Sprite.Create returned null"); return; }
+
+    // Assign sprite to both m_Sprite and m_OverrideSprite
+    static auto fn_set_sprite          = image_helper.GetMethod("set_sprite");
+    static auto fn_set_override_sprite = image_helper.GetMethod("set_overrideSprite");
+    if (fn_set_override_sprite)
+      reinterpret_cast<void(*)(void*, void*)>(fn_set_override_sprite)(bgImage, sprite);
+    if (fn_set_sprite)
+      reinterpret_cast<void(*)(void*, void*)>(fn_set_sprite)(bgImage, sprite);
+
+    // Force opaque white tint so the image is fully visible
+    static auto fn_set_color = image_helper.GetMethod("set_color");
+    if (fn_set_color) {
+      FakeColor white{1.0f, 1.0f, 1.0f, 1.0f};
+      reinterpret_cast<void(*)(void*, void*)>(fn_set_color)(bgImage, &white);
+    }
+
+    // Simple/stretched image — no slicing or preserveAspect
+    static auto fn_set_type           = image_helper.GetMethod("set_type");
+    static auto fn_set_preserve_aspect = image_helper.GetMethod("set_preserveAspect");
+    if (fn_set_type)           reinterpret_cast<void(*)(void*, int32_t)>(fn_set_type)(bgImage, 0);
+    if (fn_set_preserve_aspect) reinterpret_cast<void(*)(void*, bool)>(fn_set_preserve_aspect)(bgImage, false);
+
+    static auto fn_set_vertices_dirty = image_helper.GetMethod("SetVerticesDirty");
+    if (fn_set_vertices_dirty) reinterpret_cast<void(*)(void*)>(fn_set_vertices_dirty)(bgImage);
+
+    spdlog::info("[LS] LoginBG: custom login screen background applied (sprite={})", sprite);
+
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in LoginSequence_Awake_Hook: {}", e.what());
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in LoginSequence_Awake_Hook");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// InstallLoadingScreenBgHooks
+//   Installs all detours.  Called once during mod initialization.
+//
+//   All loading screens (initial boot + section transitions) use
+//   TransitionViewController.  The initial screen shows a long download phase
+//   during which AboutToHide fires at the end and calls
+//   set_overrideSprite(_staticOverride, null).  We counter this by writing our
+//   custom sprite to both m_OverrideSprite and m_Sprite in ApplyCustomSpriteToBGImage.
+// ─────────────────────────────────────────────────────────────────────────────
+void InstallLoadingScreenBgHooks()
+{
+  auto tv_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionViewController");
+  auto tm_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionManager");
+
+  // TransitionManager.SetLoadingScreen — pre-load texture before the screen appears
+  if (tm_helper.isValidHelper()) {
+    auto m = tm_helper.GetMethod("SetLoadingScreen");
+    if (m) {
+      SPUD_STATIC_DETOUR(m, TransitionManager_SetLoadingScreen_Hook);
+      spdlog::info("Loading screen hook installed (TransitionManager.SetLoadingScreen)");
+    } else {
+      spdlog::warn("[LS] TransitionManager.SetLoadingScreen not found");
+    }
+  } else {
+    spdlog::warn("[LS] TransitionManager class not found");
+  }
+
+  if (!tv_helper.isValidHelper()) {
+    spdlog::error("[LS] TransitionViewController class not found — no loading screen hooks installed");
+    return;
+  }
+
+  // Awake — pre-load texture and reset applied flag for new screen instance
+  if (auto m = tv_helper.GetMethod("Awake")) {
+    SPUD_STATIC_DETOUR(m, TransitionViewController_Awake_Hook);
+    spdlog::info("Loading screen hook installed (TransitionViewController.Awake)");
+  } else {
+    spdlog::warn("[LS] TransitionViewController.Awake not found");
+  }
+
+  // AboutToShow — PRIMARY: overrides the default sprite when the screen is about to be shown.
+  // TransitionViewController does NOT override Start(), so AboutToShow is the correct hook.
+  if (auto m = tv_helper.GetMethod("AboutToShow")) {
+    SPUD_STATIC_DETOUR(m, TransitionViewController_AboutToShow_Hook);
+    spdlog::info("Loading screen hook installed (TransitionViewController.AboutToShow)");
+  } else {
+    spdlog::warn("[LS] TransitionViewController.AboutToShow not found — custom background may not appear");
+  }
+
+  // OnAssetBundleDidBeginDownloadEventCallback — early apply while bundle is downloading
+  if (auto m = tv_helper.GetMethod("OnAssetBundleDidBeginDownloadEventCallback")) {
+    SPUD_STATIC_DETOUR(m, TransitionViewController_OnAssetBundleDidBeginDownload_Hook);
+    spdlog::info("Loading screen hook installed (TransitionViewController.OnAssetBundleDidBeginDownload)");
+  } else {
+    spdlog::warn("[LS] TransitionViewController.OnAssetBundleDidBeginDownloadEventCallback not found");
+  }
+
+  // DidAssetBundleDownloadCompleteEvent — safety net to detect unexpected sprite overwrites
+  if (auto m = tv_helper.GetMethod("DidAssetBundleDownloadCompleteEvent")) {
+    SPUD_STATIC_DETOUR(m, TransitionViewController_DidAssetBundleDownloadComplete_Hook);
+    spdlog::info("Loading screen hook installed (TransitionViewController.DidAssetBundleDownloadComplete)");
+  } else {
+    spdlog::warn("[LS] TransitionViewController.DidAssetBundleDownloadCompleteEvent not found");
+  }
+
+  // AboutToHide — diagnostic logging + detects when game clears m_OverrideSprite
+  if (auto m = tv_helper.GetMethod("AboutToHide")) {
+    SPUD_STATIC_DETOUR(m, TransitionViewController_AboutToHide_Hook);
+    spdlog::info("Loading screen hook installed (TransitionViewController.AboutToHide)");
+  } else {
+    spdlog::warn("[LS] TransitionViewController.AboutToHide not found");
+  }
+
+  // SlideShowViewController.ShowCurrentSlide — applies custom BG to the initial
+  // progress-bar loading screen (LoginSequence / BulkDownloadViewController scene)
+  auto ssvc_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.SlideShow", "SlideShowViewController");
+  if (ssvc_helper.isValidHelper()) {
+    if (auto m = ssvc_helper.GetMethod("ShowCurrentSlide")) {
+      SPUD_STATIC_DETOUR(m, SlideShowViewController_ShowCurrentSlide_Hook);
+      spdlog::info("Loading screen hook installed (SlideShowViewController.ShowCurrentSlide)");
+    } else {
+      spdlog::warn("[LS] SlideShowViewController.ShowCurrentSlide not found");
+    }
+  } else {
+    spdlog::warn("[LS] SlideShowViewController class not found — initial loading screen BG will not be replaced");
+  }
+
+  // CanvasController: Show (instant+fade-in), Hide (fade-out), Update (drive alpha)
+  auto cc_helper2 = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Client.UI", "CanvasController");
+  if (cc_helper2.isValidHelper()) {
+    if (auto m = cc_helper2.GetMethod("Show", 2)) {
+      SPUD_STATIC_DETOUR(m, CanvasController_Show_Hook);
+      spdlog::info("Loading screen hook installed (CanvasController.Show — instant+fade-in)");
+    } else {
+      spdlog::warn("[LS] CanvasController.Show(2) not found — slide will not be suppressed");
+    }
+    if (auto m = cc_helper2.GetMethod("Hide", 2)) {
+      SPUD_STATIC_DETOUR(m, CanvasController_Hide_Hook);
+      spdlog::info("Loading screen hook installed (CanvasController.Hide — fade-out)");
+    } else {
+      spdlog::warn("[LS] CanvasController.Hide(0) not found — fade-out unavailable");
+    }
+    if (auto m = cc_helper2.GetMethod("Update")) {
+      SPUD_STATIC_DETOUR(m, CanvasController_Update_Hook);
+      spdlog::info("Loading screen hook installed (CanvasController.Update — fade driver)");
+    } else {
+      spdlog::warn("[LS] CanvasController.Update not found — fade unavailable");
+    }
+  } else {
+    spdlog::warn("[LS] CanvasController class not found — fade unavailable");
+  }
+
+  // LoginSequence.Awake — replaces the static background Image of the login scene
+  // (the ~10-15 second initial boot screen before the TransitionViewController appears).
+  // The background is a static prefab Image with no runtime set_sprite call, so we
+  // walk the _mainCanvas hierarchy at Awake time and replace it directly.
+  auto ls_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.Login", "LoginSequence");
+  if (ls_helper.isValidHelper()) {
+    if (auto m = ls_helper.GetMethod("Awake")) {
+      SPUD_STATIC_DETOUR(m, LoginSequence_Awake_Hook);
+      spdlog::info("Loading screen hook installed (LoginSequence.Awake)");
+    } else {
+      spdlog::warn("[LS] LoginSequence.Awake not found");
+    }
+  } else {
+    spdlog::warn("[LS] LoginSequence class not found — login scene background will not be replaced");
+  }
+}

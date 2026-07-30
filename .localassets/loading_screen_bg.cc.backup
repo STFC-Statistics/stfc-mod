@@ -1,0 +1,756 @@
+#include "config.h"
+#include "errormsg.h"
+
+#include "prime/TransitionManager.h"
+
+#include <il2cpp/il2cpp_helper.h>
+
+#include <spud/detour.h>
+#include <spdlog/spdlog.h>
+
+#if _WIN32
+#include <Windows.h>
+#endif
+
+#include <filesystem>
+#include <fstream>
+#include <vector>
+
+// Embedded fallback image
+#include "embedded_loading_image.h"
+
+// Cache for the custom texture
+static void* g_customLoadingTexture = nullptr;
+
+// Forward declarations
+void* LoadTextureFromData(const std::vector<uint8_t>& data, const char* sourceName);
+
+// Helper to load texture from file
+void* LoadCustomLoadingScreenTexture(const std::string& imagePath)
+{
+  std::vector<uint8_t> data;
+  const char* sourceName;
+
+  if (imagePath.empty()) {
+    spdlog::info("[LS] Using embedded loading screen image: {} ({} bytes)", 
+                 g_embeddedLoadingImage_FILENAME, g_embeddedLoadingImage_SIZE);
+    data.assign(g_embeddedLoadingImage, g_embeddedLoadingImage + g_embeddedLoadingImage_SIZE);
+    sourceName = g_embeddedLoadingImage_FILENAME;
+  } else if (std::filesystem::exists(imagePath)) {
+    std::ifstream file(imagePath, std::ios::binary);
+    if (file.is_open()) {
+      data = std::vector<uint8_t>((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+      file.close();
+      sourceName = imagePath.c_str();
+    } else {
+      spdlog::warn("[LS] Failed to open {}, using embedded", imagePath);
+      data.assign(g_embeddedLoadingImage, g_embeddedLoadingImage + g_embeddedLoadingImage_SIZE);
+      sourceName = g_embeddedLoadingImage_FILENAME;
+    }
+  } else {
+    spdlog::warn("[LS] Image not found: {}, using embedded", imagePath);
+    data.assign(g_embeddedLoadingImage, g_embeddedLoadingImage + g_embeddedLoadingImage_SIZE);
+    sourceName = g_embeddedLoadingImage_FILENAME;
+  }
+
+  spdlog::info("[LS] Loading image from {} ({} bytes)", sourceName, data.size());
+  return LoadTextureFromData(data, sourceName);
+}
+
+// Helper to create Texture2D from raw data
+void* LoadTextureFromData(const std::vector<uint8_t>& data, const char* sourceName)
+{
+  try {
+    if (data.empty()) {
+      spdlog::error("[LS] Empty image data");
+      return nullptr;
+    }
+
+    // Get Unity's Texture2D class
+    static auto texture2d_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Texture2D");
+    if (!texture2d_helper.isValidHelper()) {
+      spdlog::error("[LS] Failed to get Texture2D class");
+      return nullptr;
+    }
+
+    // Get ImageConversion.LoadImage
+    static auto image_conversion_helper = il2cpp_get_class_helper("UnityEngine.ImageConversionModule", "UnityEngine", "ImageConversion");
+    static auto load_image_method = image_conversion_helper.GetMethod("LoadImage", 2);
+    if (!load_image_method) {
+      spdlog::error("[LS] Failed to get LoadImage method");
+      return nullptr;
+    }
+
+    // Create byte array
+    static auto byte_helper = il2cpp_get_class_helper("mscorlib", "System", "Byte");
+    Il2CppArray* byte_array = il2cpp_array_new(byte_helper.get_cls(), data.size());
+    if (!byte_array) {
+      spdlog::error("[LS] Failed to create byte array");
+      return nullptr;
+    }
+    memcpy(((Il2CppArraySize*)byte_array)->vector, data.data(), data.size());
+
+    // Create Texture2D
+    static auto texture2d_class = texture2d_helper.get_cls();
+    void* texture = il2cpp_object_new(texture2d_class);
+    if (!texture) {
+      spdlog::error("[LS] Failed to create Texture2D object");
+      return nullptr;
+    }
+
+    // Call constructor (2x2 RGBA32)
+    static auto ctor_method = texture2d_helper.GetMethod(".ctor", 4);
+    if (ctor_method) {
+      ((void (*)(void*, int, int, int, bool))ctor_method)(texture, 2, 2, 4, false);
+    }
+
+    // Load image data
+    void* load_result = ((void* (*)(void*, void*, bool))load_image_method)(texture, byte_array, false);
+    if (!load_result) {
+      spdlog::error("[LS] Failed to load image into Texture2D");
+      return nullptr;
+    }
+
+    // Get dimensions for logging
+    static auto get_width = texture2d_helper.GetMethod("get_width");
+    static auto get_height = texture2d_helper.GetMethod("get_height");
+    int w = ((int (*)(void*))get_width)(texture);
+    int h = ((int (*)(void*))get_height)(texture);
+    spdlog::info("[LS] Created Texture2D: {}x{}", w, h);
+
+    return texture;
+  } catch (...) {
+    spdlog::error("[LS] Exception in LoadTextureFromData");
+    return nullptr;
+  }
+}
+
+// DISABLED: All loading screen hooks - they cause crashes or fire too late
+// The startup loading screen appears before our hooks are installed.
+// Runtime replacement only works for transition screens, not the initial boot screen.
+
+// Forward declaration
+void ApplyTextureDuringTransition(void* transitionManager, void* texture);
+
+// Generic hook for any TransitionViewController method
+void TransitionViewController_Generic_Hook(auto original, void* _this, const char* methodName)
+{
+  try {
+    spdlog::debug("[LS] {}_Hook entered", methodName);
+    
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_custom_enabled) {
+      original(_this);
+      return;
+    }
+
+    // Call original first
+    original(_this);
+
+    // Load texture
+    if (!g_customLoadingTexture) {
+      spdlog::debug("[LS] Loading custom texture in {}...", methodName);
+      g_customLoadingTexture = LoadCustomLoadingScreenTexture(cfg.loading_screen_image_path);
+    }
+
+    if (!g_customLoadingTexture) {
+      spdlog::error("[LS] Failed to load custom texture in {}", methodName);
+      return;
+    }
+
+    // Get _staticOverride
+    static auto tv_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionViewController");
+    static auto static_override_field = tv_helper.GetField("_staticOverride");
+    
+    if (static_override_field.isValidHelper()) {
+      void* staticOverride = *(void**)((ptrdiff_t)_this + static_override_field.offset());
+      spdlog::debug("[LS] {}: _staticOverride = {}", methodName, (void*)staticOverride);
+      
+      if (staticOverride) {
+        // Create and set sprite
+        static auto image_helper = il2cpp_get_class_helper("UnityEngine.UI", "UnityEngine.UI", "Image");
+        static auto set_sprite_method = image_helper.GetMethod("set_sprite");
+        
+        if (set_sprite_method) {
+          static auto sprite_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Sprite");
+          static auto create_method = sprite_helper.GetMethod("Create", 5);
+          
+          if (create_method) {
+            static auto texture_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Texture2D");
+            static auto get_width = texture_helper.GetMethod("get_width");
+            static auto get_height = texture_helper.GetMethod("get_height");
+            int w = ((int (*)(void*))get_width)(g_customLoadingTexture);
+            int h = ((int (*)(void*))get_height)(g_customLoadingTexture);
+            
+            static auto rect_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Rect");
+            void* rect = il2cpp_object_new(rect_helper.get_cls());
+            static auto rect_ctor = rect_helper.GetMethod(".ctor", 4);
+            ((void (*)(void*, float, float, float, float))rect_ctor)(rect, 0.0f, 0.0f, (float)w, (float)h);
+            
+            static auto vector2_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Vector2");
+            void* pivot = il2cpp_object_new(vector2_helper.get_cls());
+            static auto vector2_ctor = vector2_helper.GetMethod(".ctor", 2);
+            ((void (*)(void*, float, float))vector2_ctor)(pivot, 0.5f, 0.5f);
+            
+            void* sprite = ((void* (*)(void*, void*, void*, float, uint32_t))create_method)(
+                g_customLoadingTexture, rect, pivot, 100.0f, 0);
+            
+            if (sprite) {
+              ((void (*)(void*, void*))set_sprite_method)(staticOverride, sprite);
+              spdlog::info("[LS] Background applied via {}", methodName);
+            }
+          }
+        }
+      }
+    }
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in {} hook: {}", methodName, e.what());
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in {} hook", methodName);
+  }
+}
+
+// Apply texture to _staticOverride if ready
+void TryApplyTextureToLoadingScreen(void* _this)
+{
+  if (!g_customLoadingTexture) {
+    spdlog::warn("[LS] No texture to apply!");
+    return;
+  }
+  
+  try {
+    spdlog::info("[LS] TryApplyTextureToLoadingScreen called with _this={}", _this);
+    
+    static auto tv_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionViewController");
+    static auto static_override_field = tv_helper.GetField("_staticOverride");
+    
+    if (!static_override_field.isValidHelper()) {
+      spdlog::error("[LS] _staticOverride field not valid!");
+      return;
+    }
+    
+    void* staticOverride = *(void**)((ptrdiff_t)_this + static_override_field.offset());
+    if (!staticOverride) {
+      spdlog::warn("[LS] _staticOverride is null - UI not ready yet");
+      return;
+    }
+    
+    // Check if we already applied (avoid re-applying)
+    static bool applied = false;
+    if (applied) {
+      spdlog::debug("[LS] Texture already applied, skipping");
+      return;
+    }
+    
+    spdlog::info("[LS] Applying texture to _staticOverride...");
+    
+    // Create sprite from texture
+    static auto texture_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Texture2D");
+    static auto get_width = texture_helper.GetMethod("get_width");
+    static auto get_height = texture_helper.GetMethod("get_height");
+    int w = ((int (*)(void*))get_width)(g_customLoadingTexture);
+    int h = ((int (*)(void*))get_height)(g_customLoadingTexture);
+    
+    static auto rect_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Rect");
+    void* rect = il2cpp_object_new(rect_helper.get_cls());
+    static auto rect_ctor = rect_helper.GetMethod(".ctor", 4);
+    ((void (*)(void*, float, float, float, float))rect_ctor)(rect, 0.0f, 0.0f, (float)w, (float)h);
+    
+    static auto vector2_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Vector2");
+    void* pivot = il2cpp_object_new(vector2_helper.get_cls());
+    static auto vector2_ctor = vector2_helper.GetMethod(".ctor", 2);
+    ((void (*)(void*, float, float))vector2_ctor)(pivot, 0.5f, 0.5f);
+    
+    static auto sprite_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Sprite");
+    static auto create_method = sprite_helper.GetMethod("Create", 5);
+    void* sprite = ((void* (*)(void*, void*, void*, float, uint32_t))create_method)(
+        g_customLoadingTexture, rect, pivot, 100.0f, 0);
+    
+    if (sprite) {
+      static auto image_helper = il2cpp_get_class_helper("UnityEngine.UI", "UnityEngine.UI", "Image");
+      static auto set_sprite_method = image_helper.GetMethod("set_sprite");
+      if (set_sprite_method) {
+        ((void (*)(void*, void*))set_sprite_method)(staticOverride, sprite);
+        applied = true;
+        spdlog::info("[LS] Startup loading screen background applied!");
+      }
+    }
+  } catch (...) {
+    // Ignore - will retry next time
+  }
+}
+
+// Hook for OnAssetBundleDidBeginDownload - this fires during loading
+// Signature: void OnAssetBundleDidBeginDownloadEventCallback(uint16_t ID, bool downloading)
+void TransitionViewController_OnAssetBundleDidBeginDownload_Hook(auto original, void* _this, uint16_t ID, bool downloading)
+{
+  static int callCount = 0;
+  callCount++;
+  
+  try {
+    // Call original first
+    original(_this, ID, downloading);
+    
+    if (callCount % 30 == 1) {  // Log occasionally
+      spdlog::info("[LS] OnAssetBundleDidBeginDownload fired (call #{}, ID={}, downloading={})", callCount, ID, downloading);
+    }
+    
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_custom_enabled) {
+      if (callCount == 1) spdlog::warn("[LS] custom_enabled is false!");
+      return;
+    }
+    
+    // Load texture if not already loaded
+    if (!g_customLoadingTexture) {
+      spdlog::info("[LS] Loading texture from OnAssetBundleDidBeginDownload...");
+      g_customLoadingTexture = LoadCustomLoadingScreenTexture(cfg.loading_screen_image_path);
+      if (g_customLoadingTexture) {
+        spdlog::info("[LS] Texture loaded successfully! ptr={}", (void*)g_customLoadingTexture);
+      } else {
+        spdlog::error("[LS] Failed to load texture!");
+      }
+    }
+    
+    // Try to apply texture (always try, not just when downloading)
+    if (g_customLoadingTexture) {
+      spdlog::info("[LS] Calling TryApplyTextureToLoadingScreen...");
+      TryApplyTextureToLoadingScreen(_this);
+    }
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in OnAssetBundleDidBeginDownload: {}", e.what());
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in OnAssetBundleDidBeginDownload");
+  }
+}
+
+// Hook AssetBundleManager.Awake - this runs VERY early during game boot
+void AssetBundleManager_Awake_Hook(auto original, void* _this)
+{
+  try {
+    spdlog::info("[LS] AssetBundleManager.Awake_Hook - Pre-loading texture early");
+    
+    // Pre-load texture as early as possible so it's ready for any transition
+    const auto& cfg = Config::Get();
+    if (cfg.loading_screen_custom_enabled && !g_customLoadingTexture) {
+      spdlog::info("[LS] Pre-loading texture from AssetBundleManager.Awake...");
+      g_customLoadingTexture = LoadCustomLoadingScreenTexture(cfg.loading_screen_image_path);
+      if (g_customLoadingTexture) {
+        spdlog::info("[LS] Texture pre-loaded and ready! ({})", (void*)g_customLoadingTexture);
+      } else {
+        spdlog::error("[LS] Failed to pre-load texture");
+      }
+    }
+    
+    // Call original
+    original(_this);
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in AssetBundleManager.Awake: {}", e.what());
+    original(_this);
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in AssetBundleManager.Awake");
+    original(_this);
+  }
+}
+
+
+// Helper to apply texture during transition
+void ApplyTextureDuringTransition(void* transitionManager, void* texture)
+{
+  if (!texture || !transitionManager) return;
+  
+  try {
+    static auto tm_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionManager");
+    
+    // Check if we're in an active transition by checking _currentState
+    static auto current_state_field = tm_helper.GetField("_currentState");
+    if (current_state_field.isValidHelper()) {
+      int32_t currentState = *(int32_t*)((ptrdiff_t)transitionManager + current_state_field.offset());
+      // Only apply during active transition (state > 0 usually means loading/showing)
+      if (currentState == 0) {
+        spdlog::debug("[LS] Not in active transition, skipping texture apply");
+        return;
+      }
+    }
+    
+    // Set _textureOverride directly on TransitionManager (this sets the loading screen background)
+    static auto texture_override_field = tm_helper.GetField("_textureOverride");
+    if (texture_override_field.isValidHelper()) {
+      *(void**)((ptrdiff_t)transitionManager + texture_override_field.offset()) = texture;
+      spdlog::info("[LS] Custom texture applied to TransitionManager for active transition!");
+    } else {
+      spdlog::error("[LS] Failed to get _textureOverride field");
+    }
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception applying texture: {}", e.what());
+  }
+}
+
+// SAFE wrapper for AssetBundleManager.Awake - just pre-loads texture
+void AssetBundleManager_Awake_SafeHook(auto original, void* _this)
+{
+  try {
+    // Pre-load texture before anything else
+    const auto& cfg = Config::Get();
+    if (cfg.loading_screen_custom_enabled && !g_customLoadingTexture) {
+      spdlog::info("[LS] Pre-loading texture from AssetBundleManager.Awake...");
+      g_customLoadingTexture = LoadCustomLoadingScreenTexture(cfg.loading_screen_image_path);
+      if (g_customLoadingTexture) {
+        spdlog::info("[LS] Texture pre-loaded and ready!");
+      }
+    }
+  } catch (...) {
+    // Ignore any errors during pre-load
+  }
+  
+  // Always call original
+  original(_this);
+}
+
+// SetLoadingScreen hook - applies texture to TransitionManager._textureOverride
+void TransitionManager_SetLoadingScreen_Hook(auto original, void* _this, void* status, int32_t type, int32_t messagingType)
+{
+  try {
+    spdlog::debug("[LS] SetLoadingScreen_Hook called - type={}, messagingType={}", type, messagingType);
+    
+    // Load texture if not already loaded
+    const auto& cfg = Config::Get();
+    if (cfg.loading_screen_custom_enabled && !g_customLoadingTexture) {
+      spdlog::info("[LS] Loading texture from SetLoadingScreen...");
+      g_customLoadingTexture = LoadCustomLoadingScreenTexture(cfg.loading_screen_image_path);
+      if (g_customLoadingTexture) {
+        spdlog::info("[LS] Texture loaded! ptr={}", (void*)g_customLoadingTexture);
+      }
+    }
+
+    // Call original first
+    original(_this, status, type, messagingType);
+    
+    // Note: BlurController._textureOverride is for the post-activate transition blur effect,
+    // not for the "preparing" phase background. We need to find the actual UI Image.
+    
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in SetLoadingScreen: {}", e.what());
+    original(_this, status, type, messagingType);
+  } catch (...) {
+    spdlog::error("[LS] Unknown exception in SetLoadingScreen");
+    original(_this, status, type, messagingType);
+  }
+}
+
+// Hook for TransitionViewController.Awake - set up background early
+void TransitionViewController_Awake_Hook(auto original, void* _this)
+{
+  try {
+    spdlog::info("[LS] TransitionViewController.Awake hook - setting up background");
+    
+    // Call original first to initialize the UI
+    original(_this);
+    
+    const auto& cfg = Config::Get();
+    if (!cfg.loading_screen_custom_enabled) {
+      return;
+    }
+    
+    // Load texture if needed
+    if (!g_customLoadingTexture) {
+      g_customLoadingTexture = LoadCustomLoadingScreenTexture(cfg.loading_screen_image_path);
+    }
+    
+    if (g_customLoadingTexture) {
+      // Try to set _staticOverride if it exists
+      static auto tv_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionViewController");
+      static auto static_override_field = tv_helper.GetField("_staticOverride");
+      
+      if (static_override_field.isValidHelper()) {
+        void* staticOverride = *(void**)((ptrdiff_t)_this + static_override_field.offset());
+        
+        if (staticOverride) {
+          spdlog::info("[LS] _staticOverride exists in Awake, would apply here");
+        } else {
+          spdlog::warn("[LS] _staticOverride is null in Awake - searching for background Image...");
+          
+          // Try to find the background Image by searching parent's children
+          // The black background is likely a sibling of the text elements
+          try {
+            // Get the GameObject from _this (MonoBehaviour)
+            static auto mb_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "MonoBehaviour");
+            
+            // Try to use get_gameObject
+            auto get_gameObject = mb_helper.GetMethod("get_gameObject");
+            if (get_gameObject) {
+              void* go = reinterpret_cast<void*(*)(void*)>(get_gameObject)(_this);
+              if (go) {
+                spdlog::info("[LS] Found GameObject, searching for background Image...");
+                
+                // Get transform and search children
+                static auto go_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "GameObject");
+                auto get_transform = go_helper.GetMethod("get_transform");
+                if (get_transform) {
+                  void* transform = reinterpret_cast<void*(*)(void*)>(get_transform)(go);
+                  if (transform) {
+                    spdlog::info("[LS] Found Transform, searching for Image components...");
+                    
+                    // Get child count
+                    static auto trans_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Transform");
+                    auto get_childCount = trans_helper.GetMethod("get_childCount");
+                    if (get_childCount) {
+                      int32_t childCount = reinterpret_cast<int32_t(*)(void*)>(get_childCount)(transform);
+                      spdlog::info("[LS] Found {} children", childCount);
+                      
+                      // Iterate children and find Images
+                      auto get_child = trans_helper.GetMethod("GetChild");
+                      auto getComponent = go_helper.GetMethod("GetComponent", 1);
+                      
+                      // Search for Image components in children
+                      for (int i = 0; i < childCount && i < 15; i++) {
+                        if (!get_child) continue;
+                        
+                        void* childTransform = reinterpret_cast<void*(*)(void*, int32_t)>(get_child)(transform, i);
+                        if (!childTransform) continue;
+                        
+                        // Get child GameObject
+                        auto get_go_from_trans = trans_helper.GetMethod("get_gameObject");
+                        if (!get_go_from_trans) continue;
+                        
+                        void* childGO = reinterpret_cast<void*(*)(void*)>(get_go_from_trans)(childTransform);
+                        if (!childGO) continue;
+                        
+                        // Get GameObject name for debugging
+                        auto get_name = go_helper.GetMethod("get_name");
+                        std::string childName = "unknown";
+                        if (get_name) {
+                          void* name_ptr = reinterpret_cast<void*(*)(void*)>(get_name)(childGO);
+                          if (name_ptr) {
+                            // Il2CppString is at offset 0x10 from object start
+                            char16_t* chars = reinterpret_cast<char16_t*>((ptrdiff_t)name_ptr + 0x14);
+                            // Simple UTF16 to string conversion (first 50 chars)
+                            char name_buf[100] = {0};
+                            for (int j = 0; j < 50 && chars[j]; j++) {
+                              name_buf[j] = (char)chars[j];
+                            }
+                            childName = name_buf;
+                            spdlog::info("[LS] Child {}: '{}'", i, childName);
+                          }
+                        }
+                        
+                        // Check for BGContainer (the black background)
+                        if (childName == "BGContainer") {
+                          spdlog::info("[LS] >>> FOUND BGContainer at child {}! Searching for Image...", i);
+                          
+                          // Get BGContainer's children to find the actual Image
+                          auto bg_get_childCount = trans_helper.GetMethod("get_childCount");
+                          auto bg_get_child = trans_helper.GetMethod("GetChild");
+                          
+                          if (bg_get_childCount && bg_get_child) {
+                            void* bgTransform = childTransform;
+                            int32_t bgChildCount = reinterpret_cast<int32_t(*)(void*)>(bg_get_childCount)(bgTransform);
+                            spdlog::info("[LS] BGContainer has {} children", bgChildCount);
+                            
+                            // Search BGContainer's children for an Image
+                            for (int j = 0; j < bgChildCount && j < 5; j++) {
+                              void* bgChildTransform = reinterpret_cast<void*(*)(void*, int32_t)>(bg_get_child)(bgTransform, j);
+                              if (!bgChildTransform) continue;
+                              
+                              auto get_go_from_bg = trans_helper.GetMethod("get_gameObject");
+                              if (!get_go_from_bg) continue;
+                              
+                              void* bgChildGO = reinterpret_cast<void*(*)(void*)>(get_go_from_bg)(bgChildTransform);
+                              if (!bgChildGO) continue;
+                              
+                              // Get name
+                              auto get_name_bg = go_helper.GetMethod("get_name");
+                              std::string bgChildName = "unknown";
+                              if (get_name_bg) {
+                                void* name_ptr = reinterpret_cast<void*(*)(void*)>(get_name_bg)(bgChildGO);
+                                if (name_ptr) {
+                                  char16_t* chars = reinterpret_cast<char16_t*>((ptrdiff_t)name_ptr + 0x14);
+                                  char name_buf[100] = {0};
+                                  for (int k = 0; k < 50 && chars[k]; k++) {
+                                    name_buf[k] = (char)chars[k];
+                                  }
+                                  bgChildName = name_buf;
+                                  spdlog::info("[LS] BGContainer child {}: '{}'", j, bgChildName);
+                                }
+                              }
+                              
+                              // Check for Image by looking for 'Image' in name or checking sprite field
+                              if (bgChildName.find("Image") != std::string::npos ||
+                                  bgChildName.find("Background") != std::string::npos ||
+                                  bgChildName.find("BG") != std::string::npos ||
+                                  j == 0) { // Often first child is the Image
+                                spdlog::info("[LS] >>> Potential Image found: '{}'", bgChildName);
+                                
+                                // Get Image component via GetComponent
+                                static auto image_helper = il2cpp_get_class_helper("UnityEngine.UI", "UnityEngine.UI", "Image");
+                                void* imageType = image_helper.GetType();
+                                
+                                if (imageType && bgChildGO && g_customLoadingTexture) {
+                                  // Call GetComponent<Image>() on the BG GameObject
+                                  // GetMethod returns a function pointer directly
+                                  auto getComponentMethod = go_helper.GetMethod("GetComponent", 1);
+                                  using GetComponentFn = void*(*)(void*, void*);
+                                  GetComponentFn getComponent = reinterpret_cast<GetComponentFn>(getComponentMethod);
+                                  if (getComponent) {
+                                    void* imageComponent = getComponent(bgChildGO, imageType);
+                                    
+                                    if (imageComponent) {
+                                      spdlog::info("[LS] Got Image component at BGContainer child {}! ptr={}", j, imageComponent);
+                                      
+                                      // Get texture dimensions using non-template GetMethod
+                                      static auto tex_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Texture2D");
+                                      auto getWidthFn = tex_helper.GetMethod("get_width");
+                                      auto getHeightFn = tex_helper.GetMethod("get_height");
+                                      
+                                      int32_t texWidth = 792, texHeight = 450; // Default
+                                      if (getWidthFn && getHeightFn) {
+                                        using GetIntFn = int32_t(*)(void*);
+                                        texWidth = reinterpret_cast<GetIntFn>(getWidthFn)(g_customLoadingTexture);
+                                        texHeight = reinterpret_cast<GetIntFn>(getHeightFn)(g_customLoadingTexture);
+                                      }
+                                      spdlog::info("[LS] Texture dimensions: {}x{}", texWidth, texHeight);
+                                      
+                                      // Create Rect(0, 0, width, height) on stack
+                                      // Unity Rect is: float x, y, width, height
+                                      struct FakeRect { float x, y, width, height; };
+                                      FakeRect rect{0.0f, 0.0f, (float)texWidth, (float)texHeight};
+                                      
+                                      // Create Vector2(0.5f, 0.5f) for center pivot on stack
+                                      // Unity Vector2 is: float x, y
+                                      struct FakeVector2 { float x, y; };
+                                      FakeVector2 pivot{0.5f, 0.5f};
+                                      
+                                      // Call Sprite.Create(texture, rect, pivot) using non-template GetMethod
+                                      static auto sprite_helper = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "Sprite");
+                                      auto createSpriteFn = sprite_helper.GetMethod("Create", 3);
+                                      
+                                      if (createSpriteFn) {
+                                        using CreateSpriteFn = void*(*)(void*, void*, void*);
+                                        void* newSprite = reinterpret_cast<CreateSpriteFn>(createSpriteFn)(g_customLoadingTexture, &rect, &pivot);
+                                        if (newSprite) {
+                                          spdlog::info("[LS] Created new Sprite from custom texture: {}", newSprite);
+                                          
+                                          // Try using set_sprite property setter first
+                                          auto setSprite = image_helper.GetMethod("set_sprite");
+                                          if (setSprite) {
+                                            using SetSpriteFn = void(*)(void*, void*);
+                                            reinterpret_cast<SetSpriteFn>(setSprite)(imageComponent, newSprite);
+                                            spdlog::info("[LS] CUSTOM TEXTURE APPLIED via set_sprite!");
+                                          } else {
+                                            // Fallback to direct field assignment
+                                            static auto sprite_field = image_helper.GetField("m_Sprite");
+                                            if (sprite_field.isValidHelper()) {
+                                              void* oldSprite = *(void**)((ptrdiff_t)imageComponent + sprite_field.offset());
+                                              *(void**)((ptrdiff_t)imageComponent + sprite_field.offset()) = newSprite;
+                                              spdlog::info("[LS] CUSTOM TEXTURE APPLIED via m_Sprite field! (old={}, new={})", oldSprite, newSprite);
+                                            } else {
+                                              spdlog::error("[LS] Failed to get Image.m_Sprite field");
+                                            }
+                                          }
+                                          
+                                          // Also try to refresh the Image
+                                          auto setVerticesDirty = image_helper.GetMethod("SetVerticesDirty");
+                                          if (setVerticesDirty) {
+                                            using SetDirtyFn = void(*)(void*);
+                                            reinterpret_cast<SetDirtyFn>(setVerticesDirty)(imageComponent);
+                                            spdlog::info("[LS] Called SetVerticesDirty to refresh");
+                                          }
+                                          
+                                          // Ensure color is white (not black/tinted)
+                                          auto setColor = image_helper.GetMethod("set_color");
+                                          if (setColor) {
+                                            // Unity Color is RGBA floats
+                                            struct FakeColor { float r, g, b, a; };
+                                            FakeColor white{1.0f, 1.0f, 1.0f, 1.0f};
+                                            using SetColorFn = void(*)(void*, void*);
+                                            reinterpret_cast<SetColorFn>(setColor)(imageComponent, &white);
+                                            spdlog::info("[LS] Set image color to white");
+                                          }
+                                        } else {
+                                          spdlog::error("[LS] Sprite.Create returned null");
+                                        }
+                                      } else {
+                                        spdlog::error("[LS] Failed to get Sprite.Create method");
+                                      }
+                                    } else {
+                                      spdlog::warn("[LS] GetComponent<Image> returned null");
+                                    }
+                                  }
+                                } else {
+                                  spdlog::info("[LS] Found background Image at BGContainer child {}: '{}' (texture not ready or missing Type)", j, bgChildName);
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch (const std::exception& e) {
+            spdlog::error("[LS] Error searching for background: {}", e.what());
+          }
+        }
+      }
+    }
+  } catch (const std::exception& e) {
+    spdlog::error("[LS] Exception in Awake hook: {}", e.what());
+    original(_this);
+  } catch (...) {
+    original(_this);
+  }
+}
+
+void InstallLoadingScreenBgHooks()
+{
+  // NOTE: Startup loading screen (initial boot) cannot be hooked because it appears
+  // before il2cpp_init completes. File replacement of the asset bundle is required
+  // for that screen: prime_Data\StreamingAssets\Pre-Bundles\loadingscreen\sprites
+  //
+  // Transition loading screens (initializing/preparing, between sections) can be modified
+  // but we need to be careful about when we apply the texture to avoid crashes.
+  
+  // Hook 1: TransitionViewController.Awake - Set up background early
+  {
+    auto tv_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionViewController");
+    if (tv_helper.isValidHelper()) {
+      auto awake = tv_helper.GetMethod("Awake");
+      if (awake) {
+        SPUD_STATIC_DETOUR(awake, TransitionViewController_Awake_Hook);
+        spdlog::info("Loading screen hook installed (TransitionViewController.Awake)");
+      }
+    }
+  }
+  
+  // Hook 2: TransitionManager.SetLoadingScreen - Apply texture during transitions
+  {
+    auto tm_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionManager");
+    if (tm_helper.isValidHelper()) {
+      auto setLoadingScreen = tm_helper.GetMethod("SetLoadingScreen");
+      if (setLoadingScreen) {
+        SPUD_STATIC_DETOUR(setLoadingScreen, TransitionManager_SetLoadingScreen_Hook);
+        spdlog::info("Loading screen hook installed (TransitionManager.SetLoadingScreen)");
+      }
+    }
+  }
+  
+  // Hook 3: TransitionViewController.OnAssetBundleDidBeginDownload - fires during asset loading
+  // This is where we actually load and apply the texture during transitions
+  {
+    auto tv_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.LoadingScreen", "TransitionViewController");
+    if (tv_helper.isValidHelper()) {
+      // Try OnAssetBundleDidBeginDownloadEventCallback first
+      auto onDownload = tv_helper.GetMethod("OnAssetBundleDidBeginDownloadEventCallback");
+      if (onDownload) {
+        SPUD_STATIC_DETOUR(onDownload, TransitionViewController_OnAssetBundleDidBeginDownload_Hook);
+        spdlog::info("Loading screen hook installed (TransitionViewController.OnAssetBundleDidBeginDownload)");
+      } else {
+        spdlog::warn("[LS] OnAssetBundleDidBeginDownload method not found");
+      }
+    } else {
+      spdlog::warn("[LS] TransitionViewController helper not valid");
+    }
+  }
+}

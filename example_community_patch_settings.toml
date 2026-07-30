@@ -229,6 +229,10 @@ loadingscreenhooks = true
 transitionscreenhooks = true
 focussearch = true
 
+# Enable kill tracker notifications (shows a toast every N hostile kills)
+# Also set kill_tracker_threshold and kill_tracker_interval in [ui] section
+killtrackerhooks = false
+
 #  <[=========================================================================================================================================]>
 #
 #       *   *          *     *                                      *          ****  *                     *                    *
@@ -629,6 +633,18 @@ show_station_cargo = true
 
 # This setting is not used
 auto_confirm_discovery = true
+
+# Subgroup: Kill Tracker
+# ----------------------
+
+# Number of kills between each notification (e.g. 5, 10, 25)
+kill_tracker_threshold = 5
+
+# How often to poll the server for kill count updates (seconds)
+kill_tracker_interval = 30
+
+# Automatically fetch the kill counter from the server even when the player profile is closed
+kill_tracker_auto_fetch = true
 
 #  <[===================================================================]>
 #

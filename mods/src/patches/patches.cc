@@ -40,6 +40,7 @@ void InstallLoadingScreenHooks();
 void InstallTransitionScreenHooks();
 void InstallLoadingTipHooks();
 void InstallFocusSearchHooks();
+void InstallKillTrackerHooks();
 
 __int64 il2cpp_init_hook(auto original, const char* domain_name)
 {
@@ -126,6 +127,7 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
       {"TransitionScreen",     {InstallTransitionScreenHooks, &cfg.installTransitionScreenHooks}},
       {"LoadingTip",           {InstallLoadingTipHooks,       &cfg.loader_tip_enabled}},
       {"FocusSearch",          {InstallFocusSearchHooks,      &cfg.installFocusSearchHooks}},
+      {"KillTracker",          {InstallKillTrackerHooks,      &cfg.installKillTrackerHooks}},
   };
   printf("il2cpp_init_hook(%s)\n", domain_name);
 

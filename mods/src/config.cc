@@ -658,6 +658,8 @@ void Config::Load()
       get_config_or_default(config, parsed, "patches", "giftsbulkclaimhooks", DCP::giftsbulkclaimhooks, write_config);
   this->installFocusSearchHooks =
       get_config_or_default(config, parsed, "patches", "focussearch", DCP::focussearch, write_config);
+  this->installKillTrackerHooks =
+      get_config_or_default(config, parsed, "patches", "killtrackerhooks", DCP::killtrackerhooks, write_config);
   spdlog::debug("");
 
   this->queue_enabled =
@@ -840,6 +842,14 @@ void Config::Load()
   // must explicitly include std::string typing here, or we get back char * which fails us!
   auto disabled_banner_types_str = get_config_or_default<std::string>(config, parsed, "ui", "disabled_banner_types",
                                                                       DCU::disabled_banner_types, write_log);
+
+  // Kill Tracker notification settings
+  this->kill_tracker_threshold =
+      get_config_or_default(config, parsed, "ui", "kill_tracker_threshold", DCU::kill_tracker_threshold, write_log);
+  this->kill_tracker_interval =
+      get_config_or_default(config, parsed, "ui", "kill_tracker_interval", DCU::kill_tracker_interval, write_log);
+  this->kill_tracker_auto_fetch =
+      get_config_or_default(config, parsed, "ui", "kill_tracker_auto_fetch", DCU::kill_tracker_auto_fetch, write_log);
 
   this->config_settings_url =
       get_config_or_default<std::string>(config, parsed, "config", "settings_url", DCSC::settings_url, write_log);

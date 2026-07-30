@@ -221,4 +221,10 @@ public:
   bool installLoadingScreenHooks;
   bool installTransitionScreenHooks;
   bool installFocusSearchHooks;
+  bool installKillTrackerHooks;
+
+  // Kill Tracker notification settings
+  int  kill_tracker_threshold;
+  int  kill_tracker_interval;
+  bool kill_tracker_auto_fetch;
 };

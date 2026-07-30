@@ -13,6 +13,8 @@
 #include <prime/Vector3.h>
 #include <str_utils.h>
 
+void kill_tracker_poll();
+
 void ScreenManager_UpdateCanvasRootScaleFactor_Hook(auto original, ScreenManager* _this)
 {
   original(_this);
@@ -49,6 +51,8 @@ void ScreenManager_UpdateCanvasRootScaleFactor_Hook(auto original, ScreenManager
 
     _this->m_canvasRootScaler->scaleFactor = n;
   }
+
+  kill_tracker_poll();
 }
 
 void CanvasController_Show(auto original, CanvasController* _this, int desiredEntryPoint, bool instant)

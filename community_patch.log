@@ -1,0 +1,50 @@
+[2026-07-27 19:11:02.506] [default] [info] Initializing STFC Community Mod (1.1.5.1)
+[2026-07-27 19:11:02.506] [default] [info] 
+[2026-07-27 19:11:02.506] [default] [info] Using standard names
+[2026-07-27 19:11:02.506] [default] [info]   Log: community_patch.log
+[2026-07-27 19:11:02.506] [default] [info]   Cfg: community_patch_settings.toml
+[2026-07-27 19:11:02.506] [default] [info]   Var: community_patch_runtime.vars
+[2026-07-27 19:11:02.506] [default] [info]    BL: patch_battlelogs_sent.json
+[2026-07-27 19:11:02.506] [default] [info] 
+[2026-07-27 19:11:02.506] [default] [warning] *** NOTE: Beta versions may have unexpected bugs and issues
+[2026-07-27 19:11:02.506] [default] [info] 
+[2026-07-27 19:11:02.506] [default] [info] Please see https://github.com/netniv/stfc-mod for latest configuration help,
+[2026-07-27 19:11:02.506] [default] [info] examples and future releases, or visit the STFC Community Mod discord server
+[2026-07-27 19:11:02.506] [default] [info] at https://discord.gg/PrpHgs7Vjs
+[2026-07-27 19:11:02.506] [default] [info] 
+[2026-07-27 19:11:02.506] [default] [info] =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+[2026-07-27 19:11:02.506] [default] [info] 
+[2026-07-27 19:11:02.506] [default] [info] Loading Configuration...
+[2026-07-27 19:11:02.506] [default] [info] 
+[2026-07-27 19:11:02.508] [default] [info] Creating community_patch_runtime.vars (final config file)
+[2026-07-27 19:11:02.509] [default] [info] 
+[2026-07-27 19:11:02.509] [default] [info] =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+[2026-07-27 19:11:02.509] [default] [info] 
+[2026-07-27 19:11:02.509] [default] [info] Initializing code hooks:
+[2026-07-27 19:11:02.569] [default] [info]  + Patching  1 of 20 (UiScaleHooks)
+[2026-07-27 19:11:02.571] [default] [info]  + Patching  2 of 20 (ZoomHooks)
+[2026-07-27 19:11:02.572] [default] [info]  + Patching  3 of 20 (BuffFixHooks)
+[2026-07-27 19:11:02.573] [default] [info]  + Patching  4 of 20 (ToastBannerHooks)
+[2026-07-27 19:11:02.573] [default] [info] [Notify] Windows notification service initialized
+[2026-07-27 19:11:02.573] [default] [info]  + Patching  5 of 20 (PanHooks)
+[2026-07-27 19:11:02.573] [default] [info]  + Patching  6 of 20 (HotkeyHooks)
+[2026-07-27 19:11:02.574] [default] [info]  + Patching  7 of 20 (GiftsBulkClaimHooks)
+[2026-07-27 19:11:02.575] [default] [info]  + Patching  8 of 20 (FreeResizeHooks)
+[2026-07-27 19:11:02.575] [default] [info]  + Patching  9 of 20 (TempCrashFixes)
+[2026-07-27 19:11:02.575] [default] [info]  + Patching 10 of 20 (TestPatches)
+[2026-07-27 19:11:02.576] [default] [info]  + Patching 11 of 20 (MiscPatches)
+[2026-07-27 19:11:02.576] [default] [info]  + Patching 12 of 20 (ChatPatches)
+[2026-07-27 19:11:02.576] [default] [info]  x Skipping 13 of 20 (ResolutionListFix)
+[2026-07-27 19:11:02.576] [default] [info]  + Patching 14 of 20 (SyncPatches)
+[2026-07-27 19:11:02.576] [default] [warning] Failed to open battles file (not found or not readable); starting with empty cache
+[2026-07-27 19:11:02.577] [default] [info]  + Patching 15 of 20 (ObjectTracker)
+[2026-07-27 19:11:02.710] [default] [info]  + Patching 16 of 20 (LoadingScreen)
+[2026-07-27 19:11:02.711] [default] [info]  + Patching 17 of 20 (TransitionScreen)
+[2026-07-27 19:11:02.712] [default] [info]  + Patching 18 of 20 (LoadingTip)
+[2026-07-27 19:11:02.713] [default] [info]  + Patching 19 of 20 (FocusSearch)
+[2026-07-27 19:11:02.713] [default] [info]  x Skipping 20 of 20 (KillTracker)
+[2026-07-27 19:11:02.713] [default] [info] 
+[2026-07-27 19:11:02.713] [default] [info] Installed beta version 1.1.5 (Patch 1)
+[2026-07-27 19:11:02.713] [default] [info] 
+[2026-07-27 19:11:02.713] [default] [info] =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+[2026-07-27 19:11:02.713] [default] [info] 

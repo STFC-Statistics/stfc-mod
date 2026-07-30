@@ -1,0 +1,141 @@
+{
+  "_description": "Schema of JSON payloads POSTed to sync targets (e.g. https://next.spocks.club/sync/ingress/). Each POST body is a JSON array of objects. Every object has a 'type' field identifying the data type; remaining fields carry the data. Payloads are delta-only: only changed values are sent.",
+
+  "missions": [
+    { "type": "active_mission",   "mid": 12345 },
+    { "type": "mission",          "mid": 12345 }
+  ],
+
+  "inventory": [
+    { "type": "inventory", "item_type": 1, "refid": 100001, "count": 500 }
+  ],
+
+  "research": [
+    { "type": "research", "rid": 200001, "level": 5 }
+  ],
+
+  "officer": [
+    { "type": "officer", "oid": 300001, "rank": 2, "level": 45, "shard_count": 120 }
+  ],
+
+  "tech": [
+    { "type": "ft", "fid": 400001, "tier": 3, "level": 7, "shard_count": 0 }
+  ],
+
+  "traits": [
+    { "type": "trait", "oid": 300001, "tid": 500001, "level": 2 }
+  ],
+
+  "buffs": [
+    { "type": "buff",          "bid": 600001, "level": 1, "expiry_time": 1746000000 },
+    { "type": "buff",          "bid": 600002, "level": 1, "expiry_time": null },
+    { "type": "expired_buff",  "bid": 600003 },
+    { "type": "emerald_chain", "level": 12 }
+  ],
+
+  "slots": [
+    {
+      "type": "slot", "sid": 700001, "slot_type": 1, "spec_id": 701001, "item_id": 702001,
+      "params": { "expiry_time": 1746000000 }
+    },
+    {
+      "type": "slot", "sid": 700002, "slot_type": 4, "spec_id": 701002, "item_id": null,
+      "params": { "name": "My Preset", "order": 0, "officer_ids": [300001, 300002, 300003] }
+    },
+    {
+      "type": "slot", "sid": 700003, "slot_type": 5, "spec_id": 701003, "item_id": null,
+      "params": { "order": 1 }
+    },
+    {
+      "type": "slot", "sid": 700004, "slot_type": 6, "spec_id": 701004, "item_id": null,
+      "params": { "cooldown_expiration": 1746000000 }
+    },
+    {
+      "type": "slot", "sid": 700005, "slot_type": 7, "spec_id": 701005, "item_id": null,
+      "params": { "owner_id": "player123", "tier": 2, "level": 4 }
+    },
+    {
+      "type": "slot", "sid": 700006, "slot_type": 8, "spec_id": 701006, "item_id": null,
+      "params": {
+        "name": "Fleet Alpha", "order": 0,
+        "setup": [
+          { "drydock_id": 1, "ship_id": 800001, "officer_ids": [300001, 300002, 300003] }
+        ]
+      }
+    }
+  ],
+
+  "jobs": [
+    {
+      "type": "job", "job_type": 1, "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "start_time": 1746000000, "duration": 3600, "reduction": 0,
+      "rid": 200001, "level": 6
+    },
+    {
+      "type": "job", "job_type": 2, "uuid": "ffffffff-0000-1111-2222-333333333333",
+      "start_time": 1746000000, "duration": 7200, "reduction": 600,
+      "bid": 900001, "level": 3
+    },
+    {
+      "type": "job", "job_type": 3, "uuid": "44444444-5555-6666-7777-888888888888",
+      "start_time": 1746000000, "duration": 1800, "reduction": 0,
+      "psid": 800001, "tier": 2
+    },
+    {
+      "type": "job", "job_type": 4, "uuid": "99999999-aaaa-bbbb-cccc-dddddddddddd",
+      "start_time": 1746000000, "duration": 900, "reduction": 0,
+      "psid": 800002, "hull_id": 1001, "level": 5
+    },
+    { "type": "completed_job", "uuid": "ffffffff-0000-1111-2222-333333333333" }
+  ],
+
+  "resources": [
+    { "type": "resource", "rid": 1000001, "amount": 9500000 }
+  ],
+
+  "buildings": [
+    { "type": "module", "bid": 900001, "level": 42 }
+  ],
+
+  "ships": [
+    {
+      "type": "ship",
+      "psid": 800001,
+      "hull_id": 1001,
+      "tier": 2,
+      "level": 35,
+      "level_percentage": 0.75,
+      "components": [1100001, 1100002, 1100003]
+    }
+  ],
+
+  "battlelogs": [
+    {
+      "type": "battlelog",
+      "names": {
+        "player_id_abc": {
+          "name": "PlayerName",
+          "alliance_name": "Alliance Name",
+          "alliance_tag": "ATAG"
+        }
+      },
+      "journal": {}
+    }
+  ],
+
+  "_slot_type_values": {
+    "1": "SLOTTYPE_CONSUMABLE",
+    "4": "SLOTTYPE_OFFICERPRESET",
+    "5": "SLOTTYPE_FLEETCOMMANDER",
+    "6": "SLOTTYPE_SELECTABLESKILL",
+    "7": "SLOTTYPE_FORBIDDENTECH",
+    "8": "SLOTTYPE_FLEETPRESET"
+  },
+
+  "_job_type_values": {
+    "1": "JOBTYPE_RESEARCH",
+    "2": "JOBTYPE_STARBASECONSTRUCTION",
+    "3": "JOBTYPE_SHIPTIERUP",
+    "4": "JOBTYPE_SHIPSCRAP"
+  }
+}

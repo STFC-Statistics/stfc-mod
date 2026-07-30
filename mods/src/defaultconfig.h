@@ -78,6 +78,7 @@ namespace Patches
   constexpr bool miscpatches                = true;
   constexpr bool giftsbulkclaimhooks        = true;
   constexpr bool focussearch                = true;
+  constexpr bool killtrackerhooks           = false; // opt-in feature
 } // namespace Patches
 
 namespace Shortcuts
@@ -221,6 +222,11 @@ namespace UI
   constexpr bool        show_hostile_cargo          = true;
   constexpr bool        show_player_cargo           = true;
   constexpr bool        show_station_cargo          = true;
+
+  // Kill Tracker notification settings
+  constexpr int  kill_tracker_threshold      = 5;
+  constexpr int  kill_tracker_interval       = 30;
+  constexpr bool kill_tracker_auto_fetch     = true;
 } // namespace UI
 
 } // namespace DefaultConfig
