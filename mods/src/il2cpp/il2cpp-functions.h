@@ -28,4 +28,4 @@ extern "C" {
 }
 #endif // __cplusplus
 
-void init_il2cpp_pointers();
+bool init_il2cpp_pointers();

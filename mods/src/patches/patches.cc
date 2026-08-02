@@ -1,5 +1,7 @@
 #include "patches.h"
+#include "crash_handler.h"
 #include "file.h"
+#include "hook_health.h"
 #include "version.h"
 
 #include <il2cpp/il2cpp-functions.h>
@@ -16,6 +18,7 @@
 #include <dlfcn.h>
 #include <libgen.h>
 #include <mach-o/dyld.h>
+#include <syslog.h>
 #endif
 
 void InstallUiScaleHooks();
@@ -70,6 +73,8 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
 
   spdlog::set_level(log_level);
   spdlog::flush_on(log_level);
+
+  CrashHandler::Install();
 
   spdlog::info("Initializing STFC Community Mod ({})", VER_PRODUCT_VERSION_STR);
   spdlog::info("");
@@ -131,9 +136,27 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
       {"CargoFormat",          {InstallCargoFormatHooks,      &cfg.installCargoFormatHooks}},
       {"OfficerSortHooks",     {InstallOfficerSortHooks,      &cfg.installOfficerSortHooks}},
   };
-  printf("il2cpp_init_hook(%s)\n", domain_name);
+  spdlog::info("il2cpp_init_hook({})", domain_name);
 
   auto r = original(domain_name);
+
+  // Log game/Unity version (IL2CPP is now initialized)
+  {
+    auto get_version = il2cpp_resolve_icall_typed<Il2CppString*()>("UnityEngine.Application::get_version()");
+    auto get_unity   = il2cpp_resolve_icall_typed<Il2CppString*()>("UnityEngine.Application::get_unityVersion()");
+    if (get_version) {
+      auto* ver = get_version();
+      if (ver) {
+        spdlog::info("Game version: {}", to_string(ver));
+      }
+    }
+    if (get_unity) {
+      auto* uver = get_unity();
+      if (uver) {
+        spdlog::info("Unity version: {}", to_string(uver));
+      }
+    }
+  }
 
   auto patch_count = 0;
   auto patch_total = sizeof(patches) / sizeof(patches[0]);
@@ -146,7 +169,20 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
     spdlog::info(" {}ing {:>2} of {} ({})", patch_mode, patch_count, patch_total, patch.name);
 
     if (patch_install) {
-      patch_func();
+      HookHealth::Begin(patch.name);
+      try {
+        patch_func();
+        HookHealth::Record(patch.name, HookHealth::Status::Installed);
+      } catch (const std::exception& e) {
+        spdlog::error("Patch {} failed: {}", patch.name, e.what());
+        HookHealth::Record(patch.name, HookHealth::Status::Failed, e.what());
+      } catch (...) {
+        spdlog::error("Patch {} failed: unknown exception", patch.name);
+        HookHealth::Record(patch.name, HookHealth::Status::Failed, "unknown exception");
+      }
+      HookHealth::End();
+    } else {
+      HookHealth::Record(patch.name, HookHealth::Status::Skipped);
     }
   }
 
@@ -163,6 +199,8 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
   spdlog::info("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=");
   spdlog::info("");
 
+  HookHealth::LogSummary();
+
   return r;
 }
 
@@ -173,31 +211,56 @@ void ApplyPatches()
 #else
   char     buf[PATH_MAX];
   uint32_t bufsize = PATH_MAX;
-  _NSGetExecutablePath(buf, &bufsize);
+  if (_NSGetExecutablePath(buf, &bufsize) != 0) {
+    syslog(LOG_ERR, "[STFC Community Mod] Unable to resolve executable path");
+    return;
+  }
 
   char assembly_path[PATH_MAX];
   snprintf(assembly_path, sizeof(assembly_path), "%s/%s", dirname(buf), "../Frameworks/GameAssembly.dylib");
-  printf("Loading %s\n", assembly_path);
+  syslog(LOG_INFO, "[STFC Community Mod] Loading %s", assembly_path);
   auto assembly = dlopen(assembly_path, RTLD_LAZY | RTLD_GLOBAL);
-
-  init_il2cpp_pointers();
 #endif
 
   if (assembly == nullptr) {
-    spdlog::error("Failed to load GameAssembly");
+#if _WIN32
+    spdlog::error("Failed to load GameAssembly.dll");
+#else
+    const auto* error = dlerror();
+    spdlog::error("Failed to load GameAssembly.dylib: {}", error ? error : "unknown error");
+#endif
     return;
-  } else {
+  }
+
+#if !_WIN32
+  if (!init_il2cpp_pointers()) {
+    spdlog::error("Failed to resolve required IL2CPP symbols");
+    return;
+  }
+#endif
+
+  {
     try {
 #if _WIN32
       auto n = GetProcAddress(assembly, "il2cpp_init");
 #else
       auto n = dlsym(assembly, "il2cpp_init");
 #endif
-      printf("Got il2cpp_init %p\n", n);
+      if (n == nullptr) {
+        spdlog::error("Failed to find il2cpp_init symbol in GameAssembly");
+        return;
+      }
+#if _WIN32
+      spdlog::info("Found il2cpp_init export");
+#else
+      spdlog::info("Found il2cpp_init at {}", n);
+#endif
 
       SPUD_STATIC_DETOUR(n, il2cpp_init_hook);
+    } catch (const std::exception& e) {
+      spdlog::error("Failed to apply patches: {}", e.what());
     } catch (...) {
-      // Failed to Apply at least some patches
+      spdlog::error("Failed to apply patches: unknown exception");
     }
   }
 }

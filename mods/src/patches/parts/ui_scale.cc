@@ -17,6 +17,10 @@ void ScreenManager_UpdateCanvasRootScaleFactor_Hook(auto original, ScreenManager
 {
   original(_this);
 
+  if (_this == nullptr || _this->m_canvasRootScaler == nullptr) {
+    return;
+  }
+
   #if _WIN32
   static auto cursor = LoadCursor(NULL, IDC_ARROW);
   if (!Config::Get().allow_cursor) {

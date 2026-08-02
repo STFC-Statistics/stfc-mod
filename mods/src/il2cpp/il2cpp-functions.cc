@@ -21,20 +21,29 @@ extern "C" {
 #endif // __cplusplus
 #endif
 
-void init_il2cpp_pointers()
+bool init_il2cpp_pointers()
 {
 #if !_WIN32
   char     buf[PATH_MAX];
   uint32_t bufsize = PATH_MAX;
-  _NSGetExecutablePath(buf, &bufsize);
+  if (_NSGetExecutablePath(buf, &bufsize) != 0) {
+    return false;
+  }
 
   char assembly_path[PATH_MAX];
   snprintf(assembly_path, sizeof(assembly_path), "%s/%s", dirname(buf), "../Frameworks/GameAssembly.dylib");
   auto assembly = dlopen(assembly_path, RTLD_LAZY | RTLD_GLOBAL);
+  if (assembly == nullptr) {
+    return false;
+  }
 #define DO_API(r, n, p) n = (n##_t)dlsym(assembly, #n);
 #define DO_API_NO_RETURN(r, n, p) DO_API(r, n, p)
 #include "il2cpp-api-functions.h"
 #undef DO_API
 #undef DO_API_NORETURN
+
+  return il2cpp_init != nullptr && il2cpp_domain_get != nullptr && il2cpp_class_from_name != nullptr;
+#else
+  return true;
 #endif
 }

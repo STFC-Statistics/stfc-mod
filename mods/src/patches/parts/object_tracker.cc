@@ -1,5 +1,6 @@
 #include <il2cpp/il2cpp_helper.h>
 
+#include "hook_health.h"
 #include "prime/AllianceStarbaseObjectViewerWidget.h"
 #include "prime/AnimatedRewardsScreenViewController.h"
 #include "prime/ArmadaObjectViewerWidget.h"
@@ -26,6 +27,7 @@
 #include <spud/signature.h>
 
 #include <mutex>
+#include <typeinfo>
 
 std::mutex                                                   tracked_objects_mutex;
 eastl::unordered_map<Il2CppClass*, eastl::vector<uintptr_t>> tracked_objects;
@@ -77,16 +79,9 @@ void track_finalizer(void* _this, void*)
     return;
   }
 
-  auto object = (Il2CppObject*)_this;
-  if (object->klass == nullptr) {
-    remove_from_tracking_all(_this);
-    return;
-  }
-
-#define GET_CLASS(obj) ((Il2CppClass*)(((size_t)obj) & ~(size_t)1))
-  spdlog::trace("Clearing {}({})", (void*)_this, GET_CLASS(object->klass)->name);
+  std::scoped_lock lk{tracked_objects_mutex};
+  spdlog::trace("Clearing finalizable object {}", (void*)_this);
   remove_from_tracking_all(_this);
-#undef GET_CLASS
 }
 
 void* track_ctor(auto original, void* _this)
@@ -128,14 +123,11 @@ void track_destroy(auto original, Il2CppObject* _this, uint64_t a2, uint64_t a3)
 
 void track_free(auto original, void* _this)
 {
-#define GET_CLASS(obj) ((Il2CppClass*)(((size_t)obj) & ~(size_t)1))
   if (_this != nullptr) {
     std::scoped_lock lk{tracked_objects_mutex};
-    auto             cls = (Il2CppObject*)_this;
     remove_from_tracking_all(_this);
-    return original(_this);
   }
-#undef GET_CLASS
+  return original(_this);
 }
 
 void calc_liveness_hook(auto original, void* state)
@@ -171,8 +163,19 @@ static eastl::unordered_set<void*> seen_destroy;
 template <typename T> void TrackObject()
 {
   auto& object_class = T::get_class_helper();
+  if (!object_class.isValidHelper()) {
+    HookHealth::MarkPartial("object tracker class not found");
+    spdlog::warn("TrackObject<{}>: class not found, skipping", typeid(T).name());
+    return;
+  }
   auto  ctor         = object_class.GetMethod(".ctor");
   auto  on_destroy   = object_class.GetMethod("OnDestroy");
+  if (!ctor || !on_destroy) {
+    HookHealth::MarkPartial("object tracker method not found");
+    spdlog::warn("TrackObject<{}>: .ctor or OnDestroy not found (ctor={} onDestroy={}), skipping",
+                 typeid(T).name(), (void*)ctor, (void*)on_destroy);
+    return;
+  }
   if (seen_ctor.find(ctor) == seen_ctor.end()) {
     SPUD_STATIC_DETOUR(ctor, track_ctor);
     seen_ctor.emplace(ctor);
@@ -220,6 +223,7 @@ void InstallObjectTrackers()
 #endif
 
   if (GC_register_finalizer_inner_matches.size() == 0) {
+    HookHealth::MarkPartial("GC finalizer unavailable");
     spdlog::warn("Unable to resolve GC_register_finalizer_inner; object finalizers disabled");
     return;
   }

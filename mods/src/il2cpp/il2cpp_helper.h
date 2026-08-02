@@ -8,9 +8,13 @@
 #include <il2cpp-object-internals.h>
 #include <utils/Il2CppHashMap.h>
 
-#include <EASTL/span.h>
 #include <EASTL/unordered_map.h>
 #include <EASTL/vector.h>
+
+#include <spdlog/spdlog.h>
+
+#include <mutex>
+#include <vector>
 
 #if !_WIN32
 #include <syslog.h>
@@ -26,13 +30,9 @@ public:
     this->propInfo = propInfo;
   }
 
-  bool isValidHelper()
+  bool isValidHelper() const
   {
-#if DEBUG
-    return true;
-#else
-    return this->cls != nullptr && propInfo != nullptr;
-#endif
+    return this->cls != nullptr && this->propInfo != nullptr;
   }
 
   template <typename T> void SetRaw(void* _this, T& v)
@@ -95,13 +95,9 @@ public:
     this->fieldInfo = fieldInfo;
   }
 
-  bool isValidHelper()
+  bool isValidHelper() const
   {
-#if DEBUG
-    return true;
-#else
-    return this->cls != nullptr && fieldInfo != nullptr;
-#endif
+    return this->cls != nullptr && this->fieldInfo != nullptr;
   }
 
   inline ptrdiff_t offset() const
@@ -154,13 +150,9 @@ public:
     return obj;
   }
 
-  bool isValidHelper()
+  bool isValidHelper() const
   {
-#if DEBUG
-    return true;
-#else
     return this->cls != nullptr;
-#endif
   }
 
   template <typename T = void> T* GetMethod(const char* name, int arg_count = -1)
@@ -338,9 +330,21 @@ inline IL2CppClassHelper il2cpp_get_class_helper_impl(const char* assembly, cons
 {
   auto domain    = il2cpp_domain_get();
   auto assemblyT = il2cpp_domain_assembly_open(domain, assembly);
-  auto image     = il2cpp_assembly_get_image(assemblyT);
+  if (!assemblyT) {
+    spdlog::warn("il2cpp_get_class_helper: assembly '{}' not found (looking for {}.{})", assembly, namespacez, name);
+    return IL2CppClassHelper{nullptr};
+  }
+
+  auto image = il2cpp_assembly_get_image(assemblyT);
+  if (!image) {
+    spdlog::warn("il2cpp_get_class_helper: no image for assembly '{}' (looking for {}.{})", assembly, namespacez, name);
+    return IL2CppClassHelper{nullptr};
+  }
 
   auto cls = il2cpp_class_from_name(image, namespacez, name);
+  if (!cls) {
+    spdlog::warn("il2cpp_get_class_helper: class '{}.{}' not found in assembly '{}'", namespacez, name, assembly);
+  }
 
   return IL2CppClassHelper{cls};
 }
@@ -352,24 +356,37 @@ template <typename T> inline T* il2cpp_get_array_element(Il2CppArray* array, siz
 }
 
 extern eastl::unordered_map<Il2CppClass*, eastl::vector<uintptr_t>> tracked_objects;
+extern std::mutex tracked_objects_mutex;
 
 template <typename T> class ObjectFinder
 {
 public:
   static T* Get()
   {
-    auto& objects = tracked_objects[T::get_class_helper().get_cls()];
-    if (objects.empty()) {
-      // TODO: assert?
+    auto cls = T::get_class_helper().get_cls();
+    std::scoped_lock lk{tracked_objects_mutex};
+    auto it = tracked_objects.find(cls);
+    if (it == tracked_objects.end() || it->second.empty()) {
       return nullptr;
     }
-    return reinterpret_cast<T*>(objects.back());
+    return reinterpret_cast<T*>(it->second.back());
   }
 
-  static eastl::span<T*> GetAll()
+  static std::vector<T*> GetAll()
   {
-    auto& objects = tracked_objects[T::get_class_helper().get_cls()];
-    return {reinterpret_cast<T**>(objects.data()), reinterpret_cast<T**>(objects.data()) + objects.size()};
+    auto cls = T::get_class_helper().get_cls();
+    std::scoped_lock lk{tracked_objects_mutex};
+    auto it = tracked_objects.find(cls);
+    if (it == tracked_objects.end()) {
+      return {};
+    }
+
+    std::vector<T*> result;
+    result.reserve(it->second.size());
+    for (auto object : it->second) {
+      result.emplace_back(reinterpret_cast<T*>(object));
+    }
+    return result;
   }
 };
 

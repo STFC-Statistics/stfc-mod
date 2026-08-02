@@ -11,6 +11,9 @@
 TKTouch *TKTouch_populateWithPosition_Hook(auto original, TKTouch *_this, uintptr_t pos, TouchPhase phase)
 {
   auto r = original(_this, pos, phase);
+  if (r == nullptr) {
+    return nullptr;
+  }
   if (r->phase == TouchPhase::Stationary) {
     r->phase = TouchPhase::Moved;
   }
@@ -19,6 +22,9 @@ TKTouch *TKTouch_populateWithPosition_Hook(auto original, TKTouch *_this, uintpt
 
 bool NavigationPan_LateUpdate_Hook(auto original, NavigationPan *_this)
 {
+  if (_this == nullptr) {
+    return false;
+  }
   auto d = _this->_lastDelta;
 
   if (!Config::Get().disable_move_keys) {
