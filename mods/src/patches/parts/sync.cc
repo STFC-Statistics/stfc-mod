@@ -2,6 +2,7 @@
 #include "errormsg.h"
 #include "file.h"
 #include "str_utils.h"
+#include "sync_stats.h"
 
 #include <il2cpp-api-types.h>
 #include <Digit.PrimeServer.Models.pb.h>
@@ -283,8 +284,11 @@ static void target_worker_thread(std::shared_ptr<TargetWorker> worker)
       // Synchronously wait for response
       const auto response = httpClient->Post();
 
+      SyncStats::RecordSend(identifier, response.status_code, post_data.size());
+
       if (response.status_code == 0) {
         sync_log_error(CURL_TYPE_UPLOAD, identifier, "Failed to send request: " + response.error.message);
+        SyncStats::RecordError(identifier);
       } else if (response.status_code >= 400) {
         if (response.status_code == 501) {
           sync_log_error(CURL_TYPE_UPLOAD, identifier, STR_FORMAT("Sync target does not support this operation ({}, after {:.0f} ms). Consider turning off this upload category for the target.", response.status_line, response.elapsed * 1'000));
@@ -296,14 +300,18 @@ static void target_worker_thread(std::shared_ptr<TargetWorker> worker)
       }
     } catch (const std::runtime_error& e) {
       ErrorMsg::SyncRuntime(identifier.c_str(), e);
+      SyncStats::RecordError(identifier);
     } catch (const std::exception& e) {
       ErrorMsg::SyncException(identifier.c_str(), e);
+      SyncStats::RecordError(identifier);
 #if _WIN32
     } catch (winrt::hresult_error const& ex) {
       ErrorMsg::SyncWinRT(identifier.c_str(), ex);
+      SyncStats::RecordError(identifier);
 #endif
     } catch (...) {
       ErrorMsg::SyncMsg(identifier.c_str(), "Unknown error occurred");
+      SyncStats::RecordError(identifier);
     }
   }
 }
@@ -384,6 +392,7 @@ static void send_data(SyncConfig::Type type, const std::string& post_data, bool 
       {
         std::scoped_lock lk(worker->queue_mtx);
         worker->request_queue.emplace(target_identifier, post_data, is_first_sync);
+        SyncStats::RecordQueue(target_identifier, worker->request_queue.size());
         sync_log_trace(CURL_TYPE_UPLOAD, target_identifier,
                        STR_FORMAT("Queued request (queue size: {})", worker->request_queue.size()));
       }
@@ -2107,19 +2116,6 @@ void InstallSyncPatches()
       SPUD_STATIC_DETOUR(ptr, GameServerModelRegistry_ParseBinaryObjectsHelper);
     }
   }
-#if 0
-  if (auto platform_model_registry =
-          il2cpp_get_class_helper("Digit.Client.PrimeLib.Runtime", "Digit.PrimePlatform.Core", "PlatformModelRegistry");
-      !platform_model_registry.isValidHelper()) {
-    ErrorMsg::MissingHelper("Core", "PlatformModelRegistry");
-  } else {
-    if (auto *const ptr = platform_model_registry.GetMethod("ProcessResultInternal"); ptr == nullptr) {
-      ErrorMsg::MissingMethod("PlatformModelRegistry", "ProcessResultInternal");
-    } else {
-      SPUD_STATIC_DETOUR(ptr, GameServerModelRegistry_ProcessResultInternal);
-    }
-  }
-#endif
 
   if (auto buff_data_container =
           il2cpp_get_class_helper("Digit.Client.PrimeLib.Runtime", "Digit.PrimeServer.Services", "BuffDataContainer");

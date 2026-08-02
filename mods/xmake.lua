@@ -84,7 +84,7 @@ do
     add_includedirs("src", { public = true })
 
     -- Packages
-    add_packages("spud", "nlohmann_json", "protobuf", "libil2cpp", "eastl", "toml++", "spdlog", "simdutf", "libcurl", "capstone", "cpr")
+    add_packages("spud", "nlohmann_json", "protobuf", "libil2cpp", "eastl", "toml++", "spdlog", "simdutf", "libcurl", "capstone", "cpr", "imgui")
     add_rules("protobuf.cpp")
     add_files("src/prime/proto/*.proto")
 
@@ -103,6 +103,7 @@ do
     if is_plat("windows") then
         add_cxflags("/bigobj")
         add_linkdirs("src/il2cpp")
+        add_links("d3d11", "dxgi")
     elseif is_plat("macosx") then
         add_cxflags("-fms-extensions")
         -- Add Objective-C++ source

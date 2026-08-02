@@ -5,6 +5,8 @@
 
 #include <il2cpp/il2cpp-functions.h>
 
+#include <il2cpp/il2cpp-functions.h>
+
 #include <spdlog/spdlog.h>
 
 #if _WIN32

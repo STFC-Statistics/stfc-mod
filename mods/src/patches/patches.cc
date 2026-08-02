@@ -2,6 +2,8 @@
 #include "crash_handler.h"
 #include "file.h"
 #include "hook_health.h"
+#include "overlay/overlay.h"
+#include "overlay/overlay_log.h"
 #include "version.h"
 
 #include <il2cpp/il2cpp-functions.h>
@@ -66,6 +68,8 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
   auto file_logger = spdlog::basic_logger_mt("default", File::Log(), true);
   auto sink        = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
   file_logger->sinks().push_back(sink);
+  auto overlay_sink = std::make_shared<OverlayLogSink>();
+  file_logger->sinks().push_back(overlay_sink);
   spdlog::set_default_logger(file_logger);
 
   const auto log_level =
@@ -188,6 +192,12 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
 
   spdlog::info("");
 
+  if (cfg.installGameVersionHook) {
+    spdlog::info(" GameVersion hook: enabled (installed within SyncPatches)");
+  } else {
+    spdlog::info(" x Skip  GameVersion hook (disabled, controlled by patches.game_version)");
+  }
+
 #if VERSION_PATCH
   spdlog::info("Installed beta version {}.{}.{} (Patch {})", VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION,
                VERSION_PATCH);
@@ -200,6 +210,10 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
   spdlog::info("");
 
   HookHealth::LogSummary();
+
+#if _MODDBG
+  Overlay::Install();
+#endif
 
   return r;
 }

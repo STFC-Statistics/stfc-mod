@@ -53,6 +53,12 @@ add_requires("spud v0.2.0-2")
 add_requires("libil2cpp")
 add_requires("simdutf", { system = false })
 
+if is_plat("windows") then
+    add_requires("imgui", { configs = { dx11 = true, win32 = true } })
+elseif is_plat("macosx") then
+    add_requires("imgui", { configs = { osx = true } })
+end
+
 -- includes("launcher")
 includes("mods")
 
