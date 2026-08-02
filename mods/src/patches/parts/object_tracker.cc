@@ -24,12 +24,9 @@
 #include <EASTL/vector.h>
 #include <spdlog/spdlog.h>
 #include <spud/detour.h>
-#include <spud/signature.h>
 
-#include <mutex>
 #include <typeinfo>
 
-std::mutex                                                   tracked_objects_mutex;
 eastl::unordered_map<Il2CppClass*, eastl::vector<uintptr_t>> tracked_objects;
 
 void add_to_tracking_recursive(Il2CppClass* klass, void* _this)
@@ -53,37 +50,6 @@ void remove_from_tracking_all(void* _this)
 #undef GET_CLASS
 }
 
-void remove_from_tracking_recursive(Il2CppClass* klass, void* _this)
-{
-#define GET_CLASS(obj) ((Il2CppClass*)(((size_t)obj) & ~(size_t)1))
-  if (!GET_CLASS(klass)) {
-    return;
-  }
-
-  if (tracked_objects.find(klass) == tracked_objects.end()) {
-    return;
-  }
-
-  auto& tracked_object_vector = tracked_objects[GET_CLASS(klass->parent)];
-  tracked_object_vector.erase_first(uintptr_t(_this));
-  return remove_from_tracking_recursive(GET_CLASS(klass->parent), _this);
-#undef GET_CLASS
-}
-
-void (*GC_register_finalizer_inner)(unsigned __int64 obj, void (*fn)(void*, void*), void* cd,
-                                    void (**ofn)(void*, void*), void** ocd) = nullptr;
-
-void track_finalizer(void* _this, void*)
-{
-  if (_this == nullptr) {
-    return;
-  }
-
-  std::scoped_lock lk{tracked_objects_mutex};
-  spdlog::trace("Clearing finalizable object {}", (void*)_this);
-  remove_from_tracking_all(_this);
-}
-
 void* track_ctor(auto original, void* _this)
 {
   auto obj = original(_this);
@@ -96,15 +62,7 @@ void* track_ctor(auto original, void* _this)
     return obj;
   }
 
-  std::scoped_lock lk{tracked_objects_mutex};
   spdlog::trace("Tracking {}({})", _this, cls->klass->name);
-  if (GC_register_finalizer_inner != nullptr) {
-    typedef void (*FinalizerCallback)(void* object, void* client_data);
-    FinalizerCallback oldCallback = nullptr;
-    void*             oldData     = nullptr;
-    GC_register_finalizer_inner((intptr_t)_this, track_finalizer, nullptr, &oldCallback, &oldData);
-    assert(!oldCallback);
-  }
   add_to_tracking_recursive(cls->klass, _this);
   return obj;
 }
@@ -113,8 +71,9 @@ void track_destroy(auto original, Il2CppObject* _this, uint64_t a2, uint64_t a3)
 {
 #define GET_CLASS(obj) ((Il2CppClass*)(((size_t)obj) & ~(size_t)1))
   if (_this != nullptr) {
-    std::scoped_lock lk{tracked_objects_mutex};
-    spdlog::trace("Clearing {}({})", (void*)_this, GET_CLASS(_this->klass)->name);
+    if (_this->klass != nullptr) {
+      spdlog::trace("Clearing {}({})", (void*)_this, GET_CLASS(_this->klass)->name);
+    }
     remove_from_tracking_all(_this);
   }
   return original(_this, a2, a3);
@@ -124,7 +83,6 @@ void track_destroy(auto original, Il2CppObject* _this, uint64_t a2, uint64_t a3)
 void track_free(auto original, void* _this)
 {
   if (_this != nullptr) {
-    std::scoped_lock lk{tracked_objects_mutex};
     remove_from_tracking_all(_this);
   }
   return original(_this);
@@ -134,7 +92,6 @@ void calc_liveness_hook(auto original, void* state)
 {
   original(state);
 
-  std::scoped_lock                                    lk{tracked_objects_mutex};
   eastl::vector<eastl::pair<Il2CppClass*, uintptr_t>> objects_to_free;
   eastl::unordered_set<uintptr_t>                     objects_seen;
 #define IS_MARKED(obj) (((size_t)(obj)->klass) & (size_t)1)
@@ -207,27 +164,11 @@ void InstallObjectTrackers()
   TrackObject<ElementSelectorViewController>();
   TrackObject<StarNodeObjectViewerWidget>();
 
-  SPUD_STATIC_DETOUR(il2cpp_unity_liveness_finalize, calc_liveness_hook);
-
-#if _WIN32
-  auto GC_register_finalizer_inner_matches =
-      spud::find_in_module("40 56 57 41 57 48 83 EC ? 83 3D", "GameAssembly.dll");
-#else
-#if SPUD_ARCH_ARM64
-  auto GC_register_finalizer_inner_matches = spud::find_in_module(
-    "FF ? 02 D1 FC 6F ? A9 FA 67 ? A9 F8 5F ? A9 F6 57 ? A9 F4 4F ? A9 FD 7B ? A9 FD ? 02 91 E4 0F ? A9", "GameAssembly.dylib");
-#else
-  auto GC_register_finalizer_inner_matches = spud::find_in_module(
-      "55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC ? 4C 89 45 ? 48 89 4D ? 83 3D", "GameAssembly.dylib");
-#endif
-#endif
-
-  if (GC_register_finalizer_inner_matches.size() == 0) {
-    HookHealth::MarkPartial("GC finalizer unavailable");
-    spdlog::warn("Unable to resolve GC_register_finalizer_inner; object finalizers disabled");
+  if (il2cpp_unity_liveness_finalize == nullptr) {
+    HookHealth::MarkPartial("IL2CPP liveness finalizer unavailable");
+    spdlog::warn("Unable to resolve il2cpp_unity_liveness_finalize; object cleanup disabled");
     return;
   }
+  SPUD_STATIC_DETOUR(il2cpp_unity_liveness_finalize, calc_liveness_hook);
 
-  const auto GC_register_finalizer_inner_match = GC_register_finalizer_inner_matches.get(0);
-  GC_register_finalizer_inner = (decltype(GC_register_finalizer_inner))GC_register_finalizer_inner_match.address();
 }

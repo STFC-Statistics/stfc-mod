@@ -13,7 +13,6 @@
 
 #include <spdlog/spdlog.h>
 
-#include <mutex>
 #include <vector>
 
 #if !_WIN32
@@ -356,7 +355,6 @@ template <typename T> inline T* il2cpp_get_array_element(Il2CppArray* array, siz
 }
 
 extern eastl::unordered_map<Il2CppClass*, eastl::vector<uintptr_t>> tracked_objects;
-extern std::mutex tracked_objects_mutex;
 
 template <typename T> class ObjectFinder
 {
@@ -364,8 +362,7 @@ public:
   static T* Get()
   {
     auto cls = T::get_class_helper().get_cls();
-    std::scoped_lock lk{tracked_objects_mutex};
-    auto it = tracked_objects.find(cls);
+    auto it  = tracked_objects.find(cls);
     if (it == tracked_objects.end() || it->second.empty()) {
       return nullptr;
     }
@@ -374,19 +371,33 @@ public:
 
   static std::vector<T*> GetAll()
   {
-    auto cls = T::get_class_helper().get_cls();
-    std::scoped_lock lk{tracked_objects_mutex};
-    auto it = tracked_objects.find(cls);
-    if (it == tracked_objects.end()) {
-      return {};
-    }
+    auto             cls = T::get_class_helper().get_cls();
+    std::vector<T*>  result;
 
-    std::vector<T*> result;
-    result.reserve(it->second.size());
-    for (auto object : it->second) {
-      result.emplace_back(reinterpret_cast<T*>(object));
+    // A reserve can trigger GC, and the liveness hook may remove entries from
+    // tracked_objects while it runs. Re-fetch the iterator after every
+    // potentially allocating reserve so it is never used after invalidation.
+    for (;;) {
+      auto it = tracked_objects.find(cls);
+      if (it == tracked_objects.end()) {
+        return result;
+      }
+      const auto count = it->second.size();
+      if (result.capacity() >= count) {
+        result.clear();
+        result.reserve(count);
+        it = tracked_objects.find(cls);
+        if (it == tracked_objects.end()) {
+          return result;
+        }
+        result.clear();
+        for (auto object : it->second) {
+          result.emplace_back(reinterpret_cast<T*>(object));
+        }
+        return result;
+      }
+      result.reserve(count);
     }
-    return result;
   }
 };
 
