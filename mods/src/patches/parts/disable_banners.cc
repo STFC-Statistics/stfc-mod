@@ -7,6 +7,11 @@
 
 #include <spud/detour.h>
 
+#if _MODDBG
+#include "overlay/activity_feed.h"
+#include <cstdio>
+#endif
+
 struct ToastObserver {
 };
 
@@ -15,6 +20,17 @@ void ToastObserver_EnqueueToast_Hook(auto original, ToastObserver *_this, Toast 
   if (toast == nullptr) {
     return original(_this, toast);
   }
+
+#if _MODDBG
+  {
+    auto state = toast->get_State();
+    char summary[256];
+    std::snprintf(summary, sizeof(summary), "Toast: %s (%d)", ActivityFeed::ToastStateName(state), state);
+    char detail[512];
+    std::snprintf(detail, sizeof(detail), "State: %d (%s)\nSource: EnqueueToast", state, ActivityFeed::ToastStateName(state));
+    ActivityFeed::Add(ActivityFeed::Category::Toast, summary, detail);
+  }
+#endif
 
   notification_handle_toast(toast);
 
@@ -31,6 +47,17 @@ void ToastObserver_EnqueueOrCombineToast_Hook(auto original, ToastObserver *_thi
   if (toast == nullptr) {
     return original(_this, toast, cmpAction);
   }
+
+#if _MODDBG
+  {
+    auto state = toast->get_State();
+    char summary[256];
+    std::snprintf(summary, sizeof(summary), "Toast: %s (%d) [combined]", ActivityFeed::ToastStateName(state), state);
+    char detail[512];
+    std::snprintf(detail, sizeof(detail), "State: %d (%s)\nSource: EnqueueOrCombineToast", state, ActivityFeed::ToastStateName(state));
+    ActivityFeed::Add(ActivityFeed::Category::Toast, summary, detail);
+  }
+#endif
 
   notification_handle_toast(toast);
 

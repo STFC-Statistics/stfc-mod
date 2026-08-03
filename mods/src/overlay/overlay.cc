@@ -1,4 +1,5 @@
 #include "overlay.h"
+#include "activity_feed.h"
 #include "config.h"
 #include "file.h"
 #include "hook_health.h"
@@ -49,6 +50,7 @@ static std::atomic<bool> s_visible{false};
 static bool s_showConfig      = true;
 static bool s_showOverview    = true;
 static bool s_showSync        = true;
+static bool s_showActivity    = true;
 static bool s_showSystem      = true;
 static bool s_showLogViewer   = true;
 static bool s_showInspector   = true;
@@ -63,6 +65,7 @@ void RenderPanels();
 static void RenderConfigPanel();
 static void RenderOverviewPanel();
 static void RenderSyncPanel();
+static void RenderActivityPanel();
 static void RenderSystemPanel();
 static void RenderLogViewerPanel();
 static void RenderInspectorPanel();
@@ -339,9 +342,10 @@ void RenderPanels()
       ImGui::MenuItem("Overview", nullptr, &s_showOverview);
       ImGui::MenuItem("Config", nullptr, &s_showConfig);
       ImGui::MenuItem("Sync", nullptr, &s_showSync);
+      ImGui::MenuItem("Activity", nullptr, &s_showActivity);
       ImGui::MenuItem("System", nullptr, &s_showSystem);
       ImGui::MenuItem("Inspector", nullptr, &s_showInspector);
-      ImGui::MenuItem("Log Viewer", nullptr, &s_showLogViewer);
+      ImGui::MenuItem("Logs", nullptr, &s_showLogViewer);
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Actions"))
@@ -368,6 +372,11 @@ void RenderPanels()
     if (s_showSync && ImGui::BeginTabItem("Sync"))
     {
       RenderSyncPanel();
+      ImGui::EndTabItem();
+    }
+    if (s_showActivity && ImGui::BeginTabItem("Activity"))
+    {
+      RenderActivityPanel();
       ImGui::EndTabItem();
     }
     if (s_showSystem && ImGui::BeginTabItem("System"))
@@ -397,6 +406,7 @@ static const char* StatusToString(HookHealth::Status s)
     case HookHealth::Status::Installed:    return "Installed";
     case HookHealth::Status::Skipped:      return "Skipped";
     case HookHealth::Status::Failed:       return "FAILED";
+    case HookHealth::Status::Partial:      return "Partial";
     default:                               return "NotInstalled";
   }
 }
@@ -407,6 +417,7 @@ static ImVec4 StatusColor(HookHealth::Status s)
     case HookHealth::Status::Installed:    return ImVec4(0.2f, 0.8f, 0.2f, 1.0f);
     case HookHealth::Status::Skipped:      return ImVec4(0.9f, 0.8f, 0.2f, 1.0f);
     case HookHealth::Status::Failed:       return ImVec4(0.9f, 0.2f, 0.2f, 1.0f);
+    case HookHealth::Status::Partial:      return ImVec4(0.9f, 0.6f, 0.2f, 1.0f);
     default:                               return ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
   }
 }
@@ -415,12 +426,13 @@ static void RenderOverviewPanel()
 {
   // --- Quick stats row ---
   auto entries = HookHealth::GetEntries();
-  auto installed = 0, skipped = 0, failed = 0, pending = 0;
+  auto installed = 0, skipped = 0, failed = 0, partial = 0, pending = 0;
   for (const auto& e : entries) {
     switch (e.status) {
       case HookHealth::Status::Installed: installed++; break;
       case HookHealth::Status::Skipped:   skipped++;   break;
       case HookHealth::Status::Failed:    failed++;    break;
+      case HookHealth::Status::Partial:   partial++;   break;
       default:                            pending++;   break;
     }
   }
@@ -428,6 +440,8 @@ static void RenderOverviewPanel()
   ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "%d installed", installed);
   ImGui::SameLine();
   ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.2f, 1.0f), "%d skipped", skipped);
+  ImGui::SameLine();
+  ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "%d partial", partial);
   ImGui::SameLine();
   ImGui::TextColored(ImVec4(0.9f, 0.2f, 0.2f, 1.0f), "%d failed", failed);
   ImGui::SameLine();
@@ -683,6 +697,194 @@ static void RenderSyncPanel()
     }
     ImGui::EndTable();
   }
+}
+
+static ImVec4 ActivityCategoryColor(ActivityFeed::Category c)
+{
+  switch (c) {
+    case ActivityFeed::Category::Section: return ImVec4(0.4f, 0.8f, 0.9f, 1.0f); // cyan
+    case ActivityFeed::Category::Canvas:  return ImVec4(0.5f, 0.7f, 0.9f, 1.0f); // light blue
+    case ActivityFeed::Category::Toast:   return ImVec4(0.9f, 0.8f, 0.3f, 1.0f); // yellow
+    case ActivityFeed::Category::Popup:   return ImVec4(0.9f, 0.5f, 0.3f, 1.0f); // orange
+    case ActivityFeed::Category::Chat:    return ImVec4(0.5f, 0.9f, 0.5f, 1.0f); // green
+    case ActivityFeed::Category::Http:    return ImVec4(0.7f, 0.7f, 0.7f, 1.0f); // grey
+    case ActivityFeed::Category::Rtc:     return ImVec4(0.8f, 0.6f, 0.9f, 1.0f); // purple
+    case ActivityFeed::Category::Proto:   return ImVec4(0.6f, 0.6f, 0.8f, 1.0f); // indigo
+    default:                              return ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
+  }
+}
+
+static void RenderActivityPanel()
+{
+  // --- Filter state (persisted across frames) ---
+  static bool filterAll     = true;
+  static bool filterSection = true;
+  static bool filterCanvas  = true;
+  static bool filterToast   = true;
+  static bool filterPopup   = true;
+  static bool filterChat    = true;
+  static bool filterHttp    = true;
+  static bool filterRtc     = true;
+  static bool filterProto   = true;
+
+  static bool autoScroll    = true;
+  static int  maxLines      = 500;
+
+  // --- Filter buttons ---
+  auto FilterButton = [](const char* label, bool* flag, ActivityFeed::Category cat) {
+    ImVec4 col = ActivityCategoryColor(cat);
+    if (!*flag) {
+      col = ImVec4(0.4f, 0.4f, 0.4f, 0.6f);
+    }
+    ImGui::PushStyleColor(ImGuiCol_Button, col);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+    ImGui::SmallButton(label);
+    ImGui::PopStyleColor(2);
+    if (ImGui::IsItemClicked()) {
+      *flag = !*flag;
+    }
+  };
+
+  FilterButton("All##fa", &filterAll, ActivityFeed::Category::Section);
+  ImGui::SameLine();
+  if (ImGui::Button("All On")) {
+    filterAll = filterSection = filterCanvas = filterToast = filterPopup
+             = filterChat = filterHttp = filterRtc = filterProto = true;
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("All Off")) {
+    filterAll = filterSection = filterCanvas = filterToast = filterPopup
+             = filterChat = filterHttp = filterRtc = filterProto = false;
+  }
+
+  ImGui::Separator();
+
+  FilterButton("Section##fs", &filterSection, ActivityFeed::Category::Section);
+  ImGui::SameLine();
+  FilterButton("Canvas##fc", &filterCanvas, ActivityFeed::Category::Canvas);
+  ImGui::SameLine();
+  FilterButton("Toast##ft", &filterToast, ActivityFeed::Category::Toast);
+  ImGui::SameLine();
+  FilterButton("Popup##fp", &filterPopup, ActivityFeed::Category::Popup);
+  ImGui::SameLine();
+  FilterButton("Chat##fch", &filterChat, ActivityFeed::Category::Chat);
+  ImGui::SameLine();
+  FilterButton("HTTP##fh", &filterHttp, ActivityFeed::Category::Http);
+  ImGui::SameLine();
+  FilterButton("RTC##fr", &filterRtc, ActivityFeed::Category::Rtc);
+  ImGui::SameLine();
+  FilterButton("Proto##fpb", &filterProto, ActivityFeed::Category::Proto);
+
+  ImGui::Separator();
+
+  // --- Controls ---
+  ImGui::Checkbox("Auto-scroll", &autoScroll);
+  ImGui::SameLine();
+  ImGui::SliderInt("Lines", &maxLines, 50, 1000);
+  ImGui::SameLine();
+  if (ImGui::Button("Clear"))
+    ActivityFeed::Clear();
+  ImGui::SameLine();
+  ImGui::TextDisabled("Events: %zu", ActivityFeed::Count());
+
+  ImGui::Separator();
+
+  // --- Build filter list ---
+  bool anyFilter = filterSection || filterCanvas || filterToast || filterPopup
+                 || filterChat || filterHttp || filterRtc || filterProto;
+
+  std::vector<ActivityFeed::Entry> entries;
+  if (filterAll || !anyFilter) {
+    entries = ActivityFeed::GetRecent(maxLines);
+  } else {
+    std::vector<ActivityFeed::Category> cats;
+    if (filterSection) cats.push_back(ActivityFeed::Category::Section);
+    if (filterCanvas)  cats.push_back(ActivityFeed::Category::Canvas);
+    if (filterToast)   cats.push_back(ActivityFeed::Category::Toast);
+    if (filterPopup)   cats.push_back(ActivityFeed::Category::Popup);
+    if (filterChat)    cats.push_back(ActivityFeed::Category::Chat);
+    if (filterHttp)    cats.push_back(ActivityFeed::Category::Http);
+    if (filterRtc)     cats.push_back(ActivityFeed::Category::Rtc);
+    if (filterProto)   cats.push_back(ActivityFeed::Category::Proto);
+    entries = ActivityFeed::GetFiltered(cats, maxLines);
+  }
+
+  // --- Two-pane layout: event list (left) + detail (right) ---
+  static int  selectedIdx = -1;
+  static char selectedDetail[4096] = {};
+  static char selectedSummary[512] = {};
+
+  float availW = ImGui::GetContentRegionAvail().x;
+  float listW  = availW * 0.65f;
+  float detailW = availW - listW - 8.0f;
+
+  ImGui::BeginChild("ActivityList", ImVec2(listW, 0), ImGuiChildFlags_Borders);
+
+  for (size_t i = 0; i < entries.size(); i++) {
+    const auto& e = entries[i];
+
+    // Format timestamp HH:MM:SS.mmm
+    auto        t  = std::chrono::system_clock::to_time_t(e.timestamp);
+    auto        ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         e.timestamp.time_since_epoch())
+                         .count() % 1000;
+    struct tm   tmval;
+#if _WIN32
+    localtime_s(&tmval, &t);
+#else
+    localtime_r(&t, &tmval);
+#endif
+    char ts[16];
+    std::snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
+                  tmval.tm_hour, tmval.tm_min, tmval.tm_sec, (int)ms);
+
+    ImVec4 catCol = ActivityCategoryColor(e.category);
+
+    ImGui::PushID((int)i);
+
+    // Build the display line
+    char line[768];
+    std::snprintf(line, sizeof(line), "%s  %-7s  %s", ts,
+                  ActivityFeed::CategoryTag(e.category), e.summary.c_str());
+
+    bool isSelected = ((int)i == selectedIdx);
+    ImGui::PushStyleColor(ImGuiCol_Text, catCol);
+    if (ImGui::Selectable(line, isSelected)) {
+      selectedIdx = (int)i;
+      std::snprintf(selectedSummary, sizeof(selectedSummary), "%s", e.summary.c_str());
+      std::snprintf(selectedDetail, sizeof(selectedDetail), "%s", e.detail.c_str());
+    }
+    ImGui::PopStyleColor();
+
+    ImGui::PopID();
+  }
+
+  if (autoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
+    ImGui::SetScrollHereY(1.0f);
+  }
+
+  ImGui::EndChild();
+
+  ImGui::SameLine();
+
+  // --- Detail pane ---
+  ImGui::BeginChild("ActivityDetail", ImVec2(detailW, 0), ImGuiChildFlags_Borders);
+
+  if (selectedIdx >= 0 && selectedSummary[0] != '\0') {
+    ImGui::TextUnformatted(selectedSummary);
+    ImGui::Separator();
+    if (selectedDetail[0] != '\0') {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+      ImGui::TextWrapped("%s", selectedDetail);
+      ImGui::PopStyleColor();
+    } else {
+      ImGui::TextDisabled("(no detail available)");
+    }
+  } else {
+    ImGui::TextDisabled("Select an event to see details.");
+  }
+
+  ImGui::EndChild();
 }
 
 static void RenderSystemPanel()

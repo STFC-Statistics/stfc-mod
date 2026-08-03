@@ -13,6 +13,11 @@
 #include <prime/Vector3.h>
 #include <str_utils.h>
 
+#if _MODDBG
+#include "overlay/activity_feed.h"
+#include <cstdio>
+#endif
+
 void ScreenManager_UpdateCanvasRootScaleFactor_Hook(auto original, ScreenManager* _this)
 {
   original(_this);
@@ -57,6 +62,20 @@ void ScreenManager_UpdateCanvasRootScaleFactor_Hook(auto original, ScreenManager
 
 void CanvasController_Show(auto original, CanvasController* _this, int desiredEntryPoint, bool instant)
 {
+#if _MODDBG
+  if (_this) {
+    auto* nameStr = _this->name;
+    std::string name = nameStr ? to_string(nameStr) : "(unnamed)";
+    char summary[256];
+    std::snprintf(summary, sizeof(summary), "Canvas shown: %s (entryPoint=%d, instant=%d)",
+                  name.c_str(), desiredEntryPoint, instant);
+    char detail[512];
+    std::snprintf(detail, sizeof(detail), "Canvas: %s\nEntryPoint: %d\nInstant: %d",
+                  name.c_str(), desiredEntryPoint, instant);
+    ActivityFeed::Add(ActivityFeed::Category::Canvas, summary, detail);
+  }
+#endif
+
   const auto ui_scale_viewer = Config::Get().ui_scale_viewer;
   if (_this && ui_scale_viewer != 0.0f && to_wstring(_this->name) == L"ObjectViewerTemplate_Canvas") {
     auto transform = _this->transform;

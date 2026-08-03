@@ -7,8 +7,13 @@
 #include <spud/detour.h>
 
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <string>
+
+#if _MODDBG
+#include "overlay/activity_feed.h"
+#endif
 
 namespace
 {
@@ -273,7 +278,24 @@ bool SectionManager_TriggerSectionChange(auto original,
                                          bool is_go_back_step,
                                          bool allow_same_section)
 {
+#if _MODDBG
+  int prev_section = -1;
+  if (auto* sm = Hub::get_SectionManager()) {
+    prev_section = static_cast<int>(sm->CurrentSection);
+  }
+#endif
+
   const auto changed = original(_this, next_section, args, forced_section_change, is_go_back_step, allow_same_section);
+
+#if _MODDBG
+  if (changed) {
+    char summary[256];
+    std::snprintf(summary, sizeof(summary), "section %d -> %d (forced=%d, goBack=%d)",
+                  prev_section, next_section, forced_section_change, is_go_back_step);
+    ActivityFeed::Add(ActivityFeed::Category::Section, summary);
+  }
+#endif
+
   if (changed && Config::Get().auto_open_bulk_claim_flyout && IsGiftsShopPayload(next_section, args)) {
     ArmAutoOpen();
   }

@@ -16,6 +16,10 @@
 #include <Windows.h>
 #endif
 
+#if _MODDBG
+#include "overlay/activity_feed.h"
+#endif
+
 #include <algorithm>
 #include <prime/ActionQueueManager.h>
 #include <prime/InterstitialViewController.h>
@@ -260,6 +264,10 @@ bool isFirstInterstitial = true;
 
 void InterstitialViewController_AboutToShow(auto original, InterstitialViewController* _this)
 {
+#if _MODDBG
+  ActivityFeed::Add(ActivityFeed::Category::Popup, "Interstitial popup shown");
+#endif
+
   if (false /* TEMP: disable_first_popup effect disabled */ && Config::Get().disable_first_popup
       && isFirstInterstitial && _this != nullptr) {
     isFirstInterstitial = false;

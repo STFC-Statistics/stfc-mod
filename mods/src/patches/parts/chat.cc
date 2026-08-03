@@ -8,6 +8,11 @@
 #include <spud/detour.h>
 #include <tuple>
 
+#if _MODDBG
+#include "overlay/activity_feed.h"
+#include <cstdio>
+#endif
+
 auto GetChatTabIndices()
 {
   if (const auto chat_manager = ChatManager::Instance(); chat_manager) {
@@ -71,6 +76,9 @@ void DisableButtons(FullScreenChatViewController* _this)
 void FullScreenChatViewController_AboutToShow(auto original, FullScreenChatViewController* _this)
 {
   original(_this);
+#if _MODDBG
+  ActivityFeed::Add(ActivityFeed::Category::Chat, "Full-screen chat opened");
+#endif
   DisableButtons(_this);
 }
 
@@ -89,6 +97,10 @@ void ChatPreviewController_AboutToShow(auto original, ChatPreviewController* _th
 {
   original(_this);
 
+#if _MODDBG
+  ActivityFeed::Add(ActivityFeed::Category::Chat, "Chat preview opened");
+#endif
+
   if (Config::Get().disable_galaxy_chat || Config::Get().disable_veil_chat) {
     const auto allianceChatIdx = std::get<3>(GetChatTabIndices());
     _this->_focusedPanel       = ChatChannelCategory::Alliance;
@@ -101,6 +113,14 @@ void ChatPreviewController_AboutToShow(auto original, ChatPreviewController* _th
 
 void ChatPreviewController_OnPanelFocused(auto original, ChatPreviewController* _this, int32_t index)
 {
+#if _MODDBG
+  {
+    char summary[128];
+    std::snprintf(summary, sizeof(summary), "Chat tab focused: index=%d", index);
+    ActivityFeed::Add(ActivityFeed::Category::Chat, summary);
+  }
+#endif
+
   static const auto disableGalaxyChat = Config::Get().disable_galaxy_chat;
   static const auto disableVeilChat   = Config::Get().disable_veil_chat;
 
@@ -126,6 +146,10 @@ void ChatPreviewController_OnPanelFocused(auto original, ChatPreviewController* 
 
 void ChatPreviewController_OnGlobalMessageReceived(auto original, ChatPreviewController* _this, void* message)
 {
+#if _MODDBG
+  ActivityFeed::Add(ActivityFeed::Category::Chat, "Galaxy chat message received");
+#endif
+
   if (Config::Get().disable_galaxy_chat)
     return;
 
@@ -134,6 +158,10 @@ void ChatPreviewController_OnGlobalMessageReceived(auto original, ChatPreviewCon
 
 void ChatPreviewController_OnRegionalMessageReceived(auto original, ChatPreviewController* _this, void* message)
 {
+#if _MODDBG
+  ActivityFeed::Add(ActivityFeed::Category::Chat, "Regional (veil) chat message received");
+#endif
+
   if (Config::Get().disable_veil_chat)
     return;
 

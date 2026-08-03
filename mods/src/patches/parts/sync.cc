@@ -18,6 +18,10 @@
 #include <spdlog/fmt/fmt.h>
 #endif
 
+#if _MODDBG
+#include "overlay/activity_feed.h"
+#endif
+
 #if _WIN32
 #include <rpc.h>
 #include <winrt/Windows.Foundation.h>
@@ -285,6 +289,21 @@ static void target_worker_thread(std::shared_ptr<TargetWorker> worker)
       const auto response = httpClient->Post();
 
       SyncStats::RecordSend(identifier, response.status_code, post_data.size());
+
+#if _MODDBG
+      {
+        auto url = httpClient->GetFullRequestUrl();
+        char summary[512];
+        std::snprintf(summary, sizeof(summary), "%s POST %d %.0fms %zub",
+                      identifier.c_str(), response.status_code,
+                      response.elapsed * 1000.0, post_data.size());
+        std::string detail = STR_FORMAT("Target: {}\nURL: {}\nStatus: {}\nElapsed: {:.0f}ms\nRequest body: {} bytes\nResponse (first 500 chars): {}",
+                                        identifier, url, response.status_code, response.elapsed * 1000,
+                                        post_data.size(),
+                                        response.text.size() > 500 ? response.text.substr(0, 500) : response.text);
+        ActivityFeed::Add(ActivityFeed::Category::Http, summary, std::move(detail));
+      }
+#endif
 
       if (response.status_code == 0) {
         sync_log_error(CURL_TYPE_UPLOAD, identifier, "Failed to send request: " + response.error.message);
@@ -1903,6 +1922,18 @@ void HandleEntityGroup(EntityGroup* entity_group)
     return;
   }
 
+#if _MODDBG
+  {
+    auto type = entity_group->Type_;
+    auto len  = entity_group->Group->Length;
+    char summary[256];
+    std::snprintf(summary, sizeof(summary), "EntityGroup type=%d (%zu bytes)", (int)type, (size_t)len);
+    char detail[512];
+    std::snprintf(detail, sizeof(detail), "Type: %d\nByteString length: %d", (int)type, len);
+    ActivityFeed::Add(ActivityFeed::Category::Proto, summary, detail);
+  }
+#endif
+
   const auto byteCount = static_cast<size_t>(entity_group->Group->Length);
   const auto *bytesPtr = reinterpret_cast<const char*>(entity_group->Group->bytes->m_Items);
 
@@ -2028,6 +2059,17 @@ void* RtcParser_ParseFinalPayload(auto original, void* _this, void* centrifugoIn
     if (const auto type_string = to_string(realtimeDataPayload->DataType); std::stoi(type_string) == DataType::JSON) {
       const auto target   = to_string(realtimeDataPayload->Target);
       const auto rtc_data = to_string(realtimeDataPayload->Data);
+
+#if _MODDBG
+      {
+        char summary[512];
+        std::snprintf(summary, sizeof(summary), "RTC target=%s dataType=%s", target.c_str(), type_string.c_str());
+        std::string detail = STR_FORMAT("Target: {}\nDataType: {}\nData preview: {}",
+                                        target, type_string,
+                                        rtc_data.size() > 500 ? rtc_data.substr(0, 500) : rtc_data);
+        ActivityFeed::Add(ActivityFeed::Category::Rtc, summary, std::move(detail));
+      }
+#endif
 
       // spdlog::debug("Received RTC payload for target '{}': {}", target, rtc_data);
       auto payload = std::make_unique<std::string>(rtc_data);
