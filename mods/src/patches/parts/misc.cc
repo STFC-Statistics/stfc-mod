@@ -30,6 +30,9 @@ void InventoryForPopup_set_MaxItemsToUse(auto original, InventoryForPopup* a1, i
     const auto max = Config::Get().extend_donation_max;
     if (max > 0) {
       a2 = max;
+    } else {
+      // Leave the initial unlimited value in place instead of applying the game's donation cap.
+      return;
     }
   }
 
@@ -70,77 +73,6 @@ void InstallMiscPatches()
       ErrorMsg::MissingMethod("BundleDataWidget", "OnActionButtonPressedCallback");
     } else
       SPUD_STATIC_DETOUR(ptr, BundleDataWidget_OnActionButtonPressedCallback);
-  }
-}
-
-struct Resolution {
-  int m_Width;
-  int m_Height;
-  int m_RefreshRate;
-
-  bool operator==(const Resolution& other) const
-  {
-    return this->m_Height == other.m_Height && this->m_Width == other.m_Width;
-  }
-};
-
-struct ResolutionArray {
-  Il2CppObject obj;
-  void*        bounds;
-  size_t       maxlength;
-  Resolution   data[1];
-};
-
-ResolutionArray* GetResolutions_Hook(auto original)
-{
-  auto resolutions = original();
-  if (!resolutions) {
-    return nullptr;
-  }
-
-#if _WIN32
-  // Modify
-  auto screenWidth  = GetSystemMetrics(SM_CXSCREEN);
-  auto screenHeight = GetSystemMetrics(SM_CYSCREEN);
-
-  int targetRefreshRate = 0;
-  for (int i = 0; i < resolutions->maxlength; ++i) {
-    auto ores = resolutions->data[i];
-    if (ores.m_Width == screenWidth && ores.m_Height == screenHeight) {
-      targetRefreshRate = std::max(ores.m_RefreshRate, targetRefreshRate);
-    }
-  }
-
-  std::vector<Resolution> res;
-  for (int i = 0; i < resolutions->maxlength; ++i) {
-    if (Config::Get().show_all_resolutions)
-      resolutions->data[i].m_RefreshRate = targetRefreshRate;
-
-    auto ores = resolutions->data[i];
-    if (Config::Get().show_all_resolutions || (ores.m_RefreshRate == targetRefreshRate || targetRefreshRate == 0)) {
-      res.push_back(ores);
-    }
-  }
-
-  res.erase(unique(res.begin(), res.end()), res.end());
-
-  const auto result_count = std::min(res.size(), resolutions->maxlength);
-  for (size_t i = 0; i < result_count; ++i) {
-    resolutions->data[i] = res[i];
-  }
-  resolutions->maxlength = result_count;
-#endif
-
-  return resolutions;
-}
-
-void InstallResolutionListFix()
-{
-  auto get_resolutions = il2cpp_resolve_icall_typed<ResolutionArray*()>("UnityEngine.Screen::get_resolutions()");
-  if (!get_resolutions) {
-    ErrorMsg::MissingMethod("UnityEngine.Screen", "get_resolutions");
-  } else {
-    SPUD_STATIC_DETOUR(get_resolutions, GetResolutions_Hook);
   }
 }
 
@@ -317,7 +249,7 @@ void InstallTempCrashFixes()
   static auto actionqueue_manager =
       il2cpp_get_class_helper("Assembly-CSharp", "Prime.ActionQueue", "ActionQueueManager");
   if (!actionqueue_manager.isValidHelper()) {
-    ErrorMsg::MissingHelper("ActionQueue", "ActionQueueMaanger");
+    ErrorMsg::MissingHelper("ActionQueue", "ActionQueueManager");
   } else {
     auto addtoqueue_method = actionqueue_manager.GetMethod("AddActionToQueue");
     if (addtoqueue_method == nullptr) {
