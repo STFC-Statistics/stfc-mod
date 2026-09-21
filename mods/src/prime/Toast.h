@@ -62,6 +62,7 @@ enum ToastState {
   DynamicCrisisFailed           = 56,
   DynamicCrisisCompleted        = 57,
   GalacticAnomalySystemEntered  = 58,
+  ChapterCompleted              = 59,
 };
 
 struct Toast {

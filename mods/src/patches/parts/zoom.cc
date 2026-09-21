@@ -316,6 +316,9 @@ static void ScaleFR(void *fr)
 
 void NavigationZoom_Update_Hook(auto original, NavigationZoom *_this)
 {
+  if (_this == nullptr) {
+    return;
+  }
   static auto GetMousePosition =
       il2cpp_resolve_icall_typed<void(vec3 *)>("UnityEngine.Input::get_mousePosition_Injected(UnityEngine.Vector3&)");
   static auto GetDeltaTime = il2cpp_resolve_icall_typed<float()>("UnityEngine.Time::get_deltaTime()");
@@ -526,8 +529,15 @@ void NavigationFleetWidget_OnAboutToReleaseContext_Hook(auto original, Navigatio
 void PlanetViewUtils_CameraZoomedEventHandler_Hook(auto original, PlanetViewUtils *_this, float zoomDistance,
                                                    float normalizedZoom)
 {
+  if (_this == nullptr) {
+    return original(_this, zoomDistance, normalizedZoom);
+  }
   original(_this, zoomDistance, normalizedZoom);
 
+  // Scale the current scene's backdrop through the live PlanetViewUtils instance passed in by the
+  // game for this call. Do not dereference a previously cached scene-owned NavigationZoom/camera
+  // pointer here — after a navigation-scene replacement such a pointer can be non-null while
+  // referring to an already-destroyed object.
   if (_this != nullptr) {
     _this->GetFlatRenderable(); // probe: triggers get_FlatRenderable_Hook, which scales the FR; game often reads the
                                 // field directly so our detour needs this call-path
@@ -559,6 +569,9 @@ void NavigationZoom_SetViewParameters_Hook(auto original, NavigationZoom *_this,
 
 void NavigationZoom_SetDepth_Hook(auto original, NavigationZoom *_this, NodeDepth depth)
 {
+  if (_this == nullptr) {
+    return;
+  }
   if (fleet_label_hooks_installed && depth != NodeDepth::SolarSystem) {
     if (active_system_zoom_id == reinterpret_cast<uintptr_t>(_this)) {
       ResetFleetLabelSystemState();
