@@ -99,6 +99,11 @@ public:
     return this->cls != nullptr && this->fieldInfo != nullptr;
   }
 
+  FieldInfo* get_info() const
+  {
+    return this->fieldInfo;
+  }
+
   inline ptrdiff_t offset() const
   {
     return this->fieldInfo->offset;
@@ -327,7 +332,12 @@ private:
 
 inline IL2CppClassHelper il2cpp_get_class_helper_impl(const char* assembly, const char* namespacez, const char* name)
 {
-  auto domain    = il2cpp_domain_get();
+  auto domain = il2cpp_domain_get();
+  if (!domain) {
+    spdlog::warn("il2cpp_get_class_helper: domain not found (looking for {}.{} in '{}')", namespacez, name, assembly);
+    return IL2CppClassHelper{nullptr};
+  }
+
   auto assemblyT = il2cpp_domain_assembly_open(domain, assembly);
   if (!assemblyT) {
     spdlog::warn("il2cpp_get_class_helper: assembly '{}' not found (looking for {}.{})", assembly, namespacez, name);
