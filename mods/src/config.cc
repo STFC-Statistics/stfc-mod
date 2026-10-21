@@ -1029,6 +1029,8 @@ void Config::Load()
       get_config_or_default(config, parsed, "patches", "instantcargocounterhooks", DCP::instantcargocounterhooks, write_config);
   this->installCargoFormatHooks =
       get_config_or_default(config, parsed, "patches", "cargoformathooks", DCP::cargoformathooks, write_config);
+  this->installTournamentProgressFormatHooks = get_config_or_default(
+      config, parsed, "patches", "tournamentprogressformathooks", DCP::tournamentprogressformathooks, write_config);
   this->installOfficerSortHooks =
       get_config_or_default(config, parsed, "patches", "officersorthooks", DCP::officersorthooks, write_config);
   this->installPinnedShipSortHooks =
@@ -1250,6 +1252,12 @@ void Config::Load()
       get_config_or_default(config, parsed, "ui", "instant_cargo_counter", DCU::instant_cargo_counter, write_config);
   this->cargo_significant_decimals =
       get_config_or_default(config, parsed, "ui", "cargo_significant_decimals", DCU::cargo_significant_decimals, write_config);
+  this->tournament_progress_use_locale = get_config_or_default(
+      config, parsed, "ui", "tournament_progress_use_locale", DCU::tournament_progress_use_locale, write_config);
+  this->tournament_progress_decimals = get_config_or_default(
+      config, parsed, "ui", "tournament_progress_decimals", DCU::tournament_progress_decimals, write_config);
+  this->tournament_progress_abbreviate = get_config_or_default(
+      config, parsed, "ui", "tournament_progress_abbreviate", DCU::tournament_progress_abbreviate, write_config);
 
   this->always_skip_reveal_sequence = get_config_or_default(config, parsed, "ui", "always_skip_reveal_sequence",
                                                             DCU::always_skip_reveal_sequence, write_config);

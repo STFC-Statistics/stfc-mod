@@ -112,6 +112,7 @@ namespace Patches
   constexpr bool artifactexchangehooks      = true;
   constexpr bool instantcargocounterhooks   = true;
   constexpr bool cargoformathooks           = true; // on by default: cargo number precision override
+  constexpr bool tournamentprogressformathooks = true;
   constexpr bool officersorthooks           = true; // restore Below Deck Ability sort option
   constexpr bool pinnedshiphooks            = true; // pin configured ships to front of fleet dock sort
   constexpr bool pinnedshipclicktoggle      = true; // SHIFT+click a fleet dock ship tile to pin/unpin it
@@ -312,6 +313,9 @@ namespace UI
   constexpr bool        show_station_cargo          = true;
   constexpr bool        instant_cargo_counter       = true;
   constexpr int         cargo_significant_decimals  = 2; // decimal places for abbreviated cargo values (e.g. 1.25M)
+  constexpr bool        tournament_progress_use_locale   = true;  // locale-aware separators (e.g. 1,234 en / 1.234 de)
+  constexpr int         tournament_progress_decimals     = -1;    // -1 keeps widget defaults; >=0 forces decimal places
+  constexpr bool        tournament_progress_abbreviate   = false; // compact large values (e.g. 132.5K)
 } // namespace UI
 
 } // namespace DefaultConfig

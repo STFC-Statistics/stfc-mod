@@ -284,6 +284,7 @@ audioeventhooks = true
 # Enable the buff fixes
 bufffixhooks = true
 cargoformathooks = true
+tournamentprogressformathooks = true
 chatpatches = true
 
 # Enable chat player-title visibility hooks.
@@ -870,6 +871,14 @@ officer_sort = true
 
 # Decimal places used for abbreviated cargo values
 cargo_significant_decimals = 2
+
+# Getalopmaak voor toernooi- en taakvoortgangsbalken ("huidig / doel")
+#   tournament_progress_use_locale = true   gebruik scheidingstekens van de speltaal (bijv. 1.234 nl / 1,234 en); false = komma-stijl voor alle talen
+#   tournament_progress_decimals   = -1     -1 behoudt de standaard decimalen; 0 of meer dwingt dat aantal af
+#   tournament_progress_abbreviate = false  true kort grote waarden af (bijv. 132,5K)
+tournament_progress_use_locale = true
+tournament_progress_decimals = -1
+tournament_progress_abbreviate = false
 
 # Zorgt ervoor dat lokaliseren niet werkt als je naar de vracht van een schip of andere nodes bekijkt
 disable_preview_locate = false

@@ -51,6 +51,7 @@ void InstallGalacticAnomalyTimer();
 void InstallLoadingTipHooks();
 void InstallCargoFormatHooks();
 void InstallInstantCargoCounterHooks();
+void InstallTournamentProgressFormatHooks();
 void InstallOfficerSortHooks();
 void InstallPinnedShipSortHooks();
 void InstallPinnedShipClickHooks();
@@ -177,6 +178,8 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
       {"LoadingTip", {InstallLoadingTipHooks, &cfg.installLoadingTipHooks}},
       {"InstantCargoCounter", {InstallInstantCargoCounterHooks, &cfg.installInstantCargoCounterHooks}},
       {"CargoFormat", {InstallCargoFormatHooks, &cfg.installCargoFormatHooks}},
+      {"TournamentProgressFormat",
+       {InstallTournamentProgressFormatHooks, &cfg.installTournamentProgressFormatHooks}},
       {"OfficerSortHooks", {InstallOfficerSortHooks, &cfg.installOfficerSortHooks}},
       {"PinnedShipSort", {InstallPinnedShipSortHooks, &cfg.installPinnedShipSortHooks}},
       {"PinnedShipClick", {InstallPinnedShipClickHooks, &cfg.installPinnedShipClickToggle}},

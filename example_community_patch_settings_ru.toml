@@ -284,6 +284,7 @@ audioeventhooks = true
 # Включить исправления усилений
 bufffixhooks = true
 cargoformathooks = true
+tournamentprogressformathooks = true
 chatpatches = true
 
 # Enable chat player-title visibility hooks.
@@ -870,6 +871,14 @@ officer_sort = true
 
 # Decimal places used for abbreviated cargo values
 cargo_significant_decimals = 2
+
+# Формат чисел в индикаторах прогресса турниров и заданий ("текущее / цель")
+#   tournament_progress_use_locale = true   разделители по языку игры (напр. 1 234 ru / 1,234 en); false = стиль с запятыми для всех языков
+#   tournament_progress_decimals   = -1     -1 сохраняет значение по умолчанию; 0 и более задаёт число знаков после запятой
+#   tournament_progress_abbreviate = false  true сокращает большие значения (напр. 132,5 тыс.)
+tournament_progress_use_locale = true
+tournament_progress_decimals = -1
+tournament_progress_abbreviate = false
 
 # Отключить поиск при отображении предпросмотра корабля или узла
 disable_preview_locate = false

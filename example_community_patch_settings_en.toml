@@ -284,6 +284,7 @@ audioeventhooks = true
 # Enable the buff fixes
 bufffixhooks = true
 cargoformathooks = true
+tournamentprogressformathooks = true
 chatpatches = true
 
 # Enable chat player-title visibility hooks.
@@ -873,6 +874,14 @@ officer_sort = true
 
 # Decimal places used for abbreviated cargo values
 cargo_significant_decimals = 2
+
+# Number formatting for tournament and task progress bars ("current / goal")
+#   tournament_progress_use_locale = true   use the game language's separators (e.g. 1,234 en / 1.234 de); false = comma-style for all languages
+#   tournament_progress_decimals   = -1     -1 keeps the game's default decimals; 0 or more forces that many decimal places
+#   tournament_progress_abbreviate = false  true shortens large values (e.g. 132.5K)
+tournament_progress_use_locale = true
+tournament_progress_decimals = -1
+tournament_progress_abbreviate = false
 
 # Stop locate working when ship or node previews are displayed
 disable_preview_locate = false

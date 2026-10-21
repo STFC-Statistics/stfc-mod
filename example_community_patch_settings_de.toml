@@ -284,6 +284,7 @@ audioeventhooks = true
 # Buff-Korrekturen aktivieren
 bufffixhooks = true
 cargoformathooks = true
+tournamentprogressformathooks = true
 chatpatches = true
 
 # Enable chat player-title visibility hooks.
@@ -870,6 +871,14 @@ officer_sort = true
 
 # Decimal places used for abbreviated cargo values
 cargo_significant_decimals = 2
+
+# Zahlenformatierung für Turnier- und Aufgaben-Fortschrittsbalken ("aktuell / Ziel")
+#   tournament_progress_use_locale = true   Tausendertrennzeichen der Spielesprache verwenden (z. B. 1.234 de / 1,234 en); false = Komma-Stil für alle Sprachen
+#   tournament_progress_decimals   = -1     -1 behält die Standard-Dezimalstellen; 0 oder mehr erzwingt die Anzahl
+#   tournament_progress_abbreviate = false  true kürzt große Werte ab (z. B. 132,5K)
+tournament_progress_use_locale = true
+tournament_progress_decimals = -1
+tournament_progress_abbreviate = false
 
 # Verhindert das Orten, während Schiffs- oder Knotenvorschauen angezeigt werden
 disable_preview_locate = false

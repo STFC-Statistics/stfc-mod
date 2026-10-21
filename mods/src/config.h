@@ -332,6 +332,11 @@ public:
   bool installInstantCargoCounterHooks;
   int  cargo_significant_decimals;
 
+  bool installTournamentProgressFormatHooks;
+  bool tournament_progress_use_locale;
+  int  tournament_progress_decimals;
+  bool tournament_progress_abbreviate;
+
   // Officer roster/assignment "Below Deck Ability" sort option restore
   bool installOfficerSortHooks;
 
