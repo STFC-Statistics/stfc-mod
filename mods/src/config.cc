@@ -32,6 +32,36 @@ namespace DCS  = DefaultConfig::Sync;
 namespace DCSC = DefaultConfig::SystemConfig;
 namespace DCSH = DefaultConfig::Shortcuts;
 
+namespace
+{
+constexpr bool is_all_audio_wildcard(std::string_view value)
+{
+  return value.size() == 3 && (value[0] == 'a' || value[0] == 'A') && (value[1] == 'l' || value[1] == 'L')
+         && (value[2] == 'l' || value[2] == 'L');
+}
+
+static_assert(is_all_audio_wildcard("aLl"));
+static_assert(!is_all_audio_wildcard(std::string_view{"All\0suffix", 10}));
+static_assert(!is_all_audio_wildcard(std::string_view{"\xffll", 3}));
+
+struct ToastAudioAlertConfig {
+  int                       toast_state;
+  std::string_view          config_name;
+  std::string_view          default_sound;
+  NotificationSound Config::* config_member;
+};
+
+constexpr auto kToastAudioAlerts = std::to_array<ToastAudioAlertConfig>({
+    {ToastState::Victory, "alert_victory", DCA::alert_victory, &Config::alert_victory},
+    {ToastState::Defeat, "alert_defeat", DCA::alert_defeat, &Config::alert_defeat},
+    {ToastState::ArmadaCreated, "alert_armada_created", DCA::alert_armada_created, &Config::alert_armada_created},
+    {ToastState::ArmadaBattleWon, "alert_armada_battle_won", DCA::alert_armada_battle_won,
+     &Config::alert_armada_battle_won},
+    {ToastState::ArmadaBattleLost, "alert_armada_battle_lost", DCA::alert_armada_battle_lost,
+     &Config::alert_armada_battle_lost},
+});
+} // namespace
+
 static const eastl::tuple<const char*, int> bannerTypes[] = {
     {"All", ToastState::All},
     {"Standard", ToastState::Standard},
@@ -128,16 +158,16 @@ Config& Config::Get()
   return config;
 }
 
+NotificationSound Config::NotificationSoundForToast(int toast_state) const
+{
+  const auto alert = std::ranges::find(kToastAudioAlerts, toast_state, &ToastAudioAlertConfig::toast_state);
+  return alert == kToastAudioAlerts.end() ? NotificationSound::None : this->*(alert->config_member);
+}
+
 MissionHudVisibility Config::MissionHudButtonVisibility(std::string_view button_name) const
 {
   const auto it = this->mission_hud_buttons.find(std::string(button_name));
   return it == this->mission_hud_buttons.end() ? MissionHudVisibility::Auto : it->second;
-}
-
-bool Config::MissionHudTweaksEnabled() const
-{
-  return std::ranges::any_of(this->mission_hud_buttons,
-                             [](const auto& button) { return button.second != MissionHudVisibility::Auto; });
 }
 
 #if _WIN32
@@ -225,7 +255,7 @@ void Config::AdjustUiScale(bool scaleUp)
 {
   if (this->ui_scale != 0.0f) {
     auto old_scale    = this->ui_scale;
-    auto scale_factor = (scaleUp ? 1.0f : -1.0f) * this->ui_scale_adjust;
+    auto scale_factor = (scaleUp ? 1.0f : -1.0f) * this->ui_scale_step;
     auto new_scale    = this->ui_scale + scale_factor;
     this->ui_scale    = std::clamp(new_scale, 0.1f, 2.0f);
 
@@ -239,7 +269,7 @@ void Config::AdjustUiViewerScale(bool scaleUp)
 {
   if (this->ui_scale_viewer != 0.0f) {
     auto old_scale        = this->ui_scale_viewer;
-    auto scale_factor     = (scaleUp ? 1.0f : -1.0f) * this->ui_scale_adjust;
+    auto scale_factor     = (scaleUp ? 1.0f : -1.0f) * this->ui_scale_step;
     auto new_scale        = this->ui_scale_viewer + (scale_factor * 0.25f);
     this->ui_scale_viewer = std::clamp(new_scale, 0.1f, 2.0f);
 
@@ -251,7 +281,7 @@ void Config::AdjustUiViewerScale(bool scaleUp)
 void Config::AdjustUiShipScale(bool scaleUp)
 {
   const auto old_scale    = this->ui_scale_ship;
-  const auto scale_factor = (scaleUp ? 1.0f : -1.0f) * this->ui_scale_adjust;
+  const auto scale_factor = (scaleUp ? 1.0f : -1.0f) * this->ui_scale_step;
   const auto new_scale    = this->ui_scale_ship + scale_factor;
   this->ui_scale_ship     = std::clamp(new_scale, 0.1f, 20.0f);
 
@@ -328,6 +358,36 @@ T get_config_or_default(toml::table& config, toml::table& new_config, std::strin
   }
 
   return (T)final_value;
+}
+
+NotificationSound get_notification_sound(toml::table& config, toml::table& new_config, std::string_view item,
+                                         std::string_view default_value, bool write_log)
+{
+  const auto value = get_config_or_default<std::string>(config, new_config, "audio", item,
+                                                         std::string(default_value), false);
+  auto sound = notification_sound_from_name(StripAsciiWhitespace(value));
+  if (!sound.has_value()) {
+    spdlog::warn("invalid config value audio.{}: '{}'; using {}", item, value, default_value);
+    sound = notification_sound_from_name(default_value);
+  }
+
+  const auto result = sound.value_or(NotificationSound::None);
+  new_config["audio"].as_table()->insert_or_assign(item, notification_sound_name(result));
+  if (write_log) {
+    spdlog::debug("config value audio.{} value: {}", item, notification_sound_name(result));
+  }
+  return result;
+}
+
+template <typename T>
+T get_config_or_default_with_alias(toml::table& config, toml::table& new_config, std::string_view section,
+                                   std::string_view item, std::string_view alias, T default_value, bool write_log)
+{
+  if (!config[section][item] && config[section][alias]) {
+    config[section].as_table()->insert_or_assign(item, config[section][alias]);
+  }
+
+  return get_config_or_default(config, new_config, section, item, default_value, write_log);
 }
 
 std::string_view to_string(MissionHudVisibility visibility)
@@ -409,7 +469,7 @@ InstantWarpConfirmation parse_auto_confirm_instant_warp(std::string_view value)
 }
 
 InstantWarpConfirmation get_auto_confirm_instant_warp(toml::table& config, toml::table& new_config,
-                                                       std::string_view default_value, bool write_log)
+                                                      std::string_view default_value, bool write_log)
 {
   const auto value = config["ui"]["auto_confirm_instant_warp"].value<std::string>().value_or(
       std::string(default_value));
@@ -535,15 +595,21 @@ void parse_faction_filter(std::string_view value, std::vector<std::string>& fact
   static constexpr std::array kKnownFactions{"federation", "klingon", "romulan"};
 
   factions.clear();
+  bool none = false;
   for (const auto& token : StrSplit(std::string(value), ',')) {
     const auto stripped = StripAsciiWhitespace(token);
-    if (stripped.empty()) continue;
+    if (stripped.empty())
+      continue;
 
-    auto lowered = AsciiStrToLower(stripped);
+    auto lowered = AsciiStrToLower(std::string(stripped));
 
+    if (lowered == "none") {
+      none = true;
+      continue;
+    }
     if (std::ranges::find(kKnownFactions, lowered) == kKnownFactions.end()) {
       spdlog::warn("Unrecognised faction '{}' in daily_bulk_claim_factions; expected one of: federation, klingon, "
-                   "romulan. Ignoring.",
+                   "romulan, or none by itself. Ignoring.",
                    stripped);
       continue;
     }
@@ -552,13 +618,21 @@ void parse_faction_filter(std::string_view value, std::vector<std::string>& fact
       factions.emplace_back(std::move(lowered));
     }
   }
+  if (none) {
+    if (!factions.empty())
+      spdlog::warn("daily_bulk_claim_factions: none overrides named factions; use none by itself.");
+    factions = {"none"};
+  }
 }
 
 void read_daily_bulk_claim_factions(toml::table& config, toml::table& new_config, std::vector<std::string>& factions,
                                     std::string_view default_value, bool write_log)
 {
-  const auto value =
-      config["ui"]["daily_bulk_claim_factions"].value<std::string>().value_or(std::string(default_value));
+  auto value = config["ui"]["daily_bulk_claim_factions"].value<std::string>().value_or(std::string(default_value));
+  // Blank has the same meaning as an omitted setting. Materialize the default
+  // for both gameplay and generated config values; none is the explicit opt-out.
+  if (StripAsciiWhitespace(value).empty())
+    value = std::string(default_value);
   parse_faction_filter(value, factions);
 
   new_config.emplace<toml::table>("ui", toml::table());
@@ -621,7 +695,11 @@ void read_sync_targets(toml::table& config, toml::table& new_config,
     }
 
     for (const auto& opt : SyncOptions) {
-      target.*opt.option = values[opt.option_str].value<bool>().value_or(defaults.*opt.option);
+      if (opt.type == SyncConfig::Type::Officer && !values.contains(opt.option_str)) {
+        target.*opt.option = values["officer"].value<bool>().value_or(defaults.*opt.option);
+      } else {
+        target.*opt.option = values[opt.option_str].value<bool>().value_or(defaults.*opt.option);
+      }
       parsed_target.insert(opt.option_str, target.*opt.option);
     }
 
@@ -701,7 +779,7 @@ void parse_config_shortcut_value(toml::table& new_config, std::string_view item,
     return;
   }
 
-  auto wantedKeys   = StrSplit(valueLowered, '|');
+  auto wantedKeys = StrSplit(valueLowered, '|');
 
   bool keyAdded = false;
   for (std::string_view wantedKey : wantedKeys) {
@@ -777,7 +855,7 @@ void parse_config_shortcut_aliases(toml::table& config, toml::table& new_config,
 
   config.emplace<toml::table>(section, toml::table());
 
-  auto        config_value = get_shortcut_value_or_default(config, item, default_value);
+  auto       config_value = get_shortcut_value_or_default(config, item, default_value);
   const auto has_item     = shortcut_key_exists(config, item);
 
   for (const auto alias : aliases) {
@@ -888,6 +966,10 @@ void Config::Load()
   this->installUiScaleHooks =
       get_config_or_default(config, parsed, "patches", "uiscalehooks", DCP::uiscalehooks, write_config);
   this->installZoomHooks = get_config_or_default(config, parsed, "patches", "zoomhooks", DCP::zoomhooks, write_config);
+  this->installHavenZoomHooks =
+      get_config_or_default(config, parsed, "patches", "havenzoomhooks", DCP::havenzoomhooks, write_config);
+  this->installInteriorZoomHooks =
+      get_config_or_default(config, parsed, "patches", "interiorzoomhooks", DCP::interiorzoomhooks, write_config);
   this->installBuffFixHooks =
       get_config_or_default(config, parsed, "patches", "bufffixhooks", DCP::bufffixhooks, write_config);
   this->installToastBannerHooks =
@@ -903,9 +985,12 @@ void Config::Load()
       get_config_or_default(config, parsed, "patches", "testpatches", DCP::testpatches, write_config);
   this->installMiscPatches =
       get_config_or_default(config, parsed, "patches", "miscpatches", DCP::miscpatches, write_config);
-  this->installMissionHudTweaksHooks = false;
+  this->installMissionHudTweaksHooks =
+      get_config_or_default(config, parsed, "patches", "missionhudtweakshooks", DCP::missionhudtweakshooks, write_config);
   this->installChatPatches =
       get_config_or_default(config, parsed, "patches", "chatpatches", DCP::chatpatches, write_config);
+  this->installPlayerTitleDisplayHooks = get_config_or_default(config, parsed, "patches", "chattitledisplayhooks",
+                                                               DCP::chattitledisplayhooks, write_config);
   this->installSyncPatches =
       get_config_or_default(config, parsed, "patches", "syncpatches", DCP::syncpatches, write_config);
   this->installGameVersionHook =
@@ -920,8 +1005,26 @@ void Config::Load()
       get_config_or_default(config, parsed, "patches", "giftsbulkclaimhooks", DCP::giftsbulkclaimhooks, write_config);
   this->installDailyFactionBulkClaimHooks = get_config_or_default(
       config, parsed, "patches", "dailyfactionbulkclaimhooks", DCP::dailyfactionbulkclaimhooks, write_config);
-  this->installFocusSearchHooks =
-      get_config_or_default(config, parsed, "patches", "focussearch", DCP::focussearch, write_config);
+  this->installGalacticAnomalyTimerHooks =
+      get_config_or_default(config, parsed, "patches", "galacticanomalytimerhooks", DCP::galacticanomalytimerhooks, write_config);
+  this->installLoadingTipHooks =
+      get_config_or_default(config, parsed, "patches", "loadingtiphooks", DCP::loadingtiphooks, write_config);
+  this->installDoubleClickAssignShipHooks =
+      get_config_or_default(config, parsed, "patches", "doubleclickassignshiphooks", DCP::doubleclickassignshiphooks, write_config);
+  this->installForbiddenTechConfirmationHooks =
+      get_config_or_default(config, parsed, "patches", "forbiddentechconfirmhooks", DCP::forbiddentechconfirmhooks, write_config);
+  this->installRevealConfirmationHooks =
+      get_config_or_default(config, parsed, "patches", "revealconfirmhooks", DCP::revealconfirmhooks, write_config);
+  this->installQueueAddressGuardHooks = get_config_or_default(
+      config, parsed, "patches", "queueaddressguardhooks", DCP::queueaddressguardhooks, write_config);
+  this->installActionQueueRecoveryHooks =
+      get_config_or_default(config, parsed, "patches", "actionqueuerecoveryhooks", DCP::actionqueuerecoveryhooks, write_config);
+  this->installThinQueueProtectionHooks =
+      get_config_or_default(config, parsed, "patches", "thinqueueprotectionhooks", DCP::thinqueueprotectionhooks, write_config);
+  this->installArtifactExchangeHooks =
+      get_config_or_default(config, parsed, "patches", "artifactexchangehooks", DCP::artifactexchangehooks, write_config);
+  this->installAudioEventHooks =
+      get_config_or_default(config, parsed, "patches", "audioeventhooks", DCP::audioeventhooks, write_config);
   this->installInstantCargoCounterHooks =
       get_config_or_default(config, parsed, "patches", "instantcargocounterhooks", DCP::instantcargocounterhooks, write_config);
   this->installCargoFormatHooks =
@@ -930,13 +1033,26 @@ void Config::Load()
       get_config_or_default(config, parsed, "patches", "officersorthooks", DCP::officersorthooks, write_config);
   this->installPinnedShipSortHooks =
       get_config_or_default(config, parsed, "patches", "pinnedshiphooks", DCP::pinnedshiphooks, write_config);
+  this->installPinnedShipClickToggle = get_config_or_default(config, parsed, "patches", "pinnedshipclicktoggle",
+                                                             DCP::pinnedshipclicktoggle, write_config);
+  this->installHavenHistoryHooks =
+      get_config_or_default(config, parsed, "patches", "havenhistoryhooks", DCP::havenhistoryhooks, write_config);
   spdlog::debug("");
+  this->kirshara_fixes = get_config_or_default(config, parsed, "control", "kirshara_fixes",
+                                             DCC::kirshara_fixes, write_config);
+  if (!config["control"]["kirshara_fixes"]
+      && (config["control"]["faster_queue_recovery"] || config["control"]["thin_queue_protection"]
+          || config["control"]["queue_address_guard"] || config["advanced"]["queue"]["thin_queue_protection"]))
+    spdlog::warn("The separate queue feature settings have been replaced by [control] kirshara_fixes (default=true). "
+                 "Set kirshara_fixes=false to disable the combined fixes; old feature settings are ignored.");
   this->queue_enabled =
       get_config_or_default(config, parsed, "control", "queue_enabled", DCC::queue_enabled, write_config);
   this->hotkeys_enabled =
       get_config_or_default(config, parsed, "control", "hotkeys_enabled", DCC::hotkeys_enabled, write_config);
   this->hotkeys_extended =
       get_config_or_default(config, parsed, "control", "hotkeys_extended", DCC::hotkeys_extended, write_config);
+  this->primary_requires_visible_target = get_config_or_default(
+      config, parsed, "control", "primary_requires_visible_target", DCC::primary_requires_visible_target, write_config);
   this->use_scopely_hotkeys =
       get_config_or_default(config, parsed, "control", "use_scopely_hotkeys", DCC::use_scopely_hotkeys, write_config);
   this->select_timer =
@@ -947,14 +1063,27 @@ void Config::Load()
   spdlog::debug("");
 
   this->ui_scale = get_config_or_default(config, parsed, "graphics", "ui_scale", DCG::ui_scale, write_config);
-  this->ui_scale_adjust =
-      get_config_or_default(config, parsed, "graphics", "ui_scale_adjust", DCG::ui_scale_adjust, write_config);
+  this->ui_scale_step = get_config_or_default_with_alias(config, parsed, "graphics", "ui_scale_step", "ui_scale_adjust",
+                                                         DCG::ui_scale_step, write_config);
   this->ui_scale_ship =
       get_config_or_default(config, parsed, "graphics", "ui_scale_ship", DCG::ui_scale_ship, write_config);
   this->ui_scale_viewer =
       get_config_or_default(config, parsed, "graphics", "ui_scale_viewer", DCG::ui_scale_viewer, write_config);
-  this->zoom               = get_config_or_default(config, parsed, "graphics", "zoom", DCG::zoom, write_config);
-  this->fr_scale           = get_config_or_default(config, parsed, "graphics", "fr_scale", DCG::fr_scale, write_config);
+  this->zoom     = get_config_or_default(config, parsed, "graphics", "zoom", DCG::zoom, write_config);
+  this->haven_zoom = get_config_or_default(config, parsed, "graphics", "haven_zoom", DCG::haven_zoom, write_config);
+  if (!std::isfinite(this->haven_zoom) || this->haven_zoom < 0.0f) {
+    spdlog::warn("Invalid haven_zoom {}; using {}", this->haven_zoom, DCG::haven_zoom);
+    this->haven_zoom = DCG::haven_zoom;
+    parsed["graphics"].as_table()->insert_or_assign("haven_zoom", this->haven_zoom);
+  }
+  this->interior_zoom_scale =
+      get_config_or_default(config, parsed, "graphics", "interior_zoom_scale", DCG::interior_zoom_scale, write_config);
+  if (!std::isfinite(this->interior_zoom_scale) || this->interior_zoom_scale < 1.0f) {
+    spdlog::warn("Invalid interior_zoom_scale {}; using {}", this->interior_zoom_scale, DCG::interior_zoom_scale);
+    this->interior_zoom_scale = DCG::interior_zoom_scale;
+    parsed["graphics"].as_table()->insert_or_assign("interior_zoom_scale", this->interior_zoom_scale);
+  }
+  this->fr_scale = get_config_or_default(config, parsed, "graphics", "fr_scale", DCG::fr_scale, write_config);
   this->zoom_label_player.detail =
       get_fleet_label_detail(config, parsed, "zoom_label_player_detail", DCG::zoom_label_player_detail, write_config);
   this->zoom_label_player.zoom_threshold = get_fleet_label_zoom_threshold(
@@ -1009,14 +1138,14 @@ void Config::Load()
 
   this->disable_escape_exit =
       get_config_or_default(config, parsed, "ui", "disable_escape_exit", DCU::disable_escape_exit, write_config);
-  this->disable_escape_exit_timer =
-      get_config_or_default(config, parsed, "ui", "disable_escape_exit_timer", DCU::disable_escape_exit_timer, write_config);
+  this->disable_escape_exit_timer = get_config_or_default(config, parsed, "ui", "disable_escape_exit_timer",
+                                                          DCU::disable_escape_exit_timer, write_config);
   this->disable_preview_locate =
       get_config_or_default(config, parsed, "ui", "disable_preview_locate", DCU::disable_preview_locate, write_config);
   this->disable_preview_recall =
       get_config_or_default(config, parsed, "ui", "disable_preview_recall", DCU::disable_preview_recall, write_config);
-  this->disable_first_popup =
-      get_config_or_default(config, parsed, "ui", "disable_first_popup", DCU::disable_first_popup, write_config);
+  this->only_show_first_popup = get_config_or_default(config, parsed, "ui", "only_show_first_popup",
+                                                      DCU::only_show_first_popup, write_config);
   this->disable_move_keys =
       get_config_or_default(config, parsed, "ui", "disable_move_keys", DCU::disable_move_keys, write_config);
   this->disable_toast_banners =
@@ -1025,16 +1154,27 @@ void Config::Load()
       get_config_or_default(config, parsed, "audio", "trace_events", DCA::trace_events, write_config);
   auto disabled_audio_events = get_config_or_default<std::string>(
       config, parsed, "audio", "disabled_events", DCA::disabled_events, write_config);
+  this->disable_all_audio_events = false;
   this->disabled_audio_events.clear();
   for (const auto& event : StrSplit(disabled_audio_events, ',')) {
     auto stripped = StripAsciiWhitespace(event);
-    if (!stripped.empty()) {
+    if (is_all_audio_wildcard(stripped)) {
+      this->disable_all_audio_events = true;
+    } else if (!stripped.empty()) {
       this->disabled_audio_events.emplace_back(stripped);
     }
   }
-  this->installAudioEventHooks = this->trace_audio_events || !this->disabled_audio_events.empty();
+  bool any_toast_audio_alert_configured = false;
+  for (const auto& alert : kToastAudioAlerts) {
+    const auto sound = get_notification_sound(config, parsed, alert.config_name, alert.default_sound, write_config);
+    this->*(alert.config_member) = sound;
+    any_toast_audio_alert_configured |= sound != NotificationSound::None;
+  }
+  if (!this->installToastBannerHooks && any_toast_audio_alert_configured) {
+    spdlog::warn("audio alerts require patches.toastbannerhooks = true");
+  }
   this->auto_open_bulk_claim_flyout = get_config_or_default(config, parsed, "ui", "auto_open_bulk_claim_flyout",
-                                                             DCU::auto_open_bulk_claim_flyout, write_config);
+                                                            DCU::auto_open_bulk_claim_flyout, write_config);
 
   read_daily_bulk_claim_factions(config, parsed, this->daily_bulk_claim_factions, DCU::daily_bulk_claim_factions,
                                  write_config);
@@ -1053,19 +1193,34 @@ void Config::Load()
 
   {
     bool unused_match_all = false;
-    read_instant_warp_filter(config, parsed, "pinned_ships", this->pinned_ships, unused_match_all,
-                             DCU::pinned_ships, write_config);
+    read_instant_warp_filter(config, parsed, "pinned_ships", this->pinned_ships, unused_match_all, DCU::pinned_ships,
+                             write_config);
   }
 
   this->double_click_to_assign_ship = get_config_or_default(config, parsed, "ui", "double_click_to_assign_ship",
-                                                             DCU::double_click_to_assign_ship, write_config);
+                                                            DCU::double_click_to_assign_ship, write_config);
+  this->focus_search = get_config_or_default(config, parsed, "ui", "focus_search", DCU::focus_search, write_config);
+  this->format_cargo_values = get_config_or_default_with_alias(
+      config, parsed, "ui", "format_cargo_values", "cargo_format", DCU::format_cargo_values, write_config);
+  this->officer_sort = get_config_or_default(config, parsed, "ui", "officer_sort", DCU::officer_sort, write_config);
+  this->reverse_haven_history = get_config_or_default(config, parsed, "ui", "reverse_haven_history",
+                                                       DCU::reverse_haven_history, write_config);
 
+  this->dock_syncmanagement =
+      get_config_or_default(config, parsed, "ui", "dock_syncmanagement",
+                            DCU::dock_syncmanagement, write_config);
   this->arrow_keys_to_select_ship = get_config_or_default(config, parsed, "ui", "arrow_keys_to_select_ship",
-                                                           DCU::arrow_keys_to_select_ship, write_config);
+                                                          DCU::arrow_keys_to_select_ship, write_config);
 
   this->auto_confirm_ft_upgrade =
       get_config_or_default(config, parsed, "ui", "auto_confirm_ft_upgrade",
-                            DCU::auto_confirm_ft_upgrade, write_config);
+                                                        DCU::auto_confirm_ft_upgrade, write_config);
+  this->auto_confirm_reveal_ability =
+      get_config_or_default(config, parsed, "ui", "auto_confirm_reveal_ability",
+                                                        DCU::auto_confirm_reveal_ability, write_config);
+  this->auto_confirm_alliance_contribution =
+      get_config_or_default(config, parsed, "ui", "auto_confirm_alliance_contribution",
+                                                        DCU::auto_confirm_alliance_contribution, write_config);
 
   this->extend_chest_purchase_max = get_config_or_default(config, parsed, "ui", "extend_chest_purchase_max",
                                                           DCU::extend_chest_purchase_max, write_config);
@@ -1078,6 +1233,8 @@ void Config::Load()
       get_config_or_default(config, parsed, "ui", "disable_galaxy_chat", DCU::disable_galaxy_chat, write_config);
   this->disable_veil_chat =
       get_config_or_default(config, parsed, "ui", "disable_veil_chat", DCU::disable_veil_chat, write_config);
+  this->show_player_title =
+      get_config_or_default(config, parsed, "ui", "show_player_title", DCU::show_player_title, write_config);
   this->show_cargo_default =
       get_config_or_default(config, parsed, "ui", "show_cargo_default", DCU::show_cargo_default, write_config);
   this->show_player_cargo =
@@ -1105,11 +1262,9 @@ void Config::Load()
   this->mission_hud_buttons.emplace(
       "outposts", get_mission_hud_visibility(config, parsed, "hud_outposts", DCU::hud_outposts, write_config));
   this->mission_hud_buttons.emplace(
-      "daily_goals",
-      get_mission_hud_visibility(config, parsed, "hud_daily_goals", DCU::hud_daily_goals, write_config));
-  this->mission_hud_buttons.emplace(
       "missions", get_mission_hud_visibility(config, parsed, "hud_missions", DCU::hud_missions, write_config));
-  this->installMissionHudTweaksHooks = this->MissionHudTweaksEnabled();
+  this->disable_exchange_all = get_config_or_default_with_alias(
+      config, parsed, "ui", "disable_exchange_all", "hide_artifact_exchange_all", DCU::disable_exchange_all, write_config);
 
   spdlog::debug("");
 
@@ -1123,7 +1278,12 @@ void Config::Load()
   sync_defaults.verify_ssl = get_config_or_default(config, parsed, "sync", "verify_ssl", DCS::verify_ssl, write_config);
 
   for (const auto& opt : SyncOptions) {
-    sync_defaults.*opt.option = get_config_or_default(config, parsed, "sync", opt.option_str, false, write_config);
+    if (opt.type == SyncConfig::Type::Officer) {
+      sync_defaults.*opt.option = get_config_or_default_with_alias(
+          config, parsed, "sync", opt.option_str, "officer", false, write_config);
+    } else {
+      sync_defaults.*opt.option = get_config_or_default(config, parsed, "sync", opt.option_str, false, write_config);
+    }
   }
 
   spdlog::debug("");
@@ -1182,6 +1342,8 @@ void Config::Load()
       get_config_or_default<std::string>(config, parsed, "graphics", "loader_image", DCG::loader_image, write_log);
   this->loader_logo_scale =
       get_config_or_default(config, parsed, "graphics", "loader_logo_scale", DCG::loader_logo_scale, write_log);
+  this->galactic_anomaly_timer =
+      get_config_or_default(config, parsed, "graphics", "galactic_anomaly_timer", DCG::galactic_anomaly_timer, write_log);
   this->loader_tip_enabled =
       get_config_or_default(config, parsed, "graphics", "loader_tip_enabled", DCG::loader_tip_enabled, write_log);
 
@@ -1247,7 +1409,7 @@ void Config::Load()
 
   parse_config_shortcut(config, parsed, "move_up", GameFunction::MoveUp, DCSH::move_up);
   parse_config_shortcut(config, parsed, "move_down", GameFunction::MoveDown, DCSH::move_down);
-  parse_config_shortcut(config, parsed, "move_left",  GameFunction::MoveLeft,  DCSH::move_left);
+  parse_config_shortcut(config, parsed, "move_left", GameFunction::MoveLeft, DCSH::move_left);
   parse_config_shortcut(config, parsed, "move_right", GameFunction::MoveRight, DCSH::move_right);
 
   parse_config_shortcut_aliases(config, parsed, "set_hotkeys_disabled", GameFunction::DisableHotKeys,
@@ -1302,8 +1464,7 @@ void Config::Load()
   parse_config_shortcut(config, parsed, "ui_scaleup", GameFunction::UiScaleUp, DCSH::ui_scaleup);
   parse_config_shortcut(config, parsed, "ui_scaledown", GameFunction::UiScaleDown, DCSH::ui_scaledown);
   parse_config_shortcut(config, parsed, "ui_scaleshipup", GameFunction::UiShipScaleUp, DCSH::ui_scaleshipup);
-  parse_config_shortcut(config, parsed, "ui_scaleshipdown", GameFunction::UiShipScaleDown,
-                        DCSH::ui_scaleshipdown);
+  parse_config_shortcut(config, parsed, "ui_scaleshipdown", GameFunction::UiShipScaleDown, DCSH::ui_scaleshipdown);
   parse_config_shortcut(config, parsed, "ui_scaleviewerup", GameFunction::UiViewerScaleUp, DCSH::ui_scaleviewerup);
   parse_config_shortcut(config, parsed, "ui_scaleviewerdown", GameFunction::UiViewerScaleDown,
                         DCSH::ui_scaleviewerdown);
@@ -1314,8 +1475,7 @@ void Config::Load()
   parse_config_shortcut(config, parsed, "log_warn", GameFunction::LogLevelWarn, DCSH::log_warn);
   parse_config_shortcut(config, parsed, "log_error", GameFunction::LogLevelError, DCSH::log_error);
   parse_config_shortcut(config, parsed, "log_off", GameFunction::LogLevelOff, DCSH::log_off);
-  parse_config_shortcut(config, parsed, "restart", GameFunction::Restart,
-                        DCSH::restart);
+  parse_config_shortcut(config, parsed, "restart", GameFunction::Restart, DCSH::restart);
 
   parse_config_shortcut(config, parsed, "show_awayteam", GameFunction::ShowAwayTeam, DCSH::show_awayteam);
   parse_config_shortcut(config, parsed, "show_gifts", GameFunction::ShowGifts, DCSH::show_gifts);
@@ -1335,10 +1495,15 @@ void Config::Load()
   parse_config_shortcut(config, parsed, "toggle_shortcut_hints", GameFunction::ToggleShortcutHints,
                         DCSH::toggle_shortcut_hints);
   parse_config_shortcut(config, parsed, "show_officers", GameFunction::ShowOfficers, DCSH::show_officers);
+  parse_config_shortcut(config, parsed, "show_officerpresets", GameFunction::ShowOfficerPresets,
+                        DCSH::show_officerpresets);
+  parse_config_shortcut(config, parsed, "show_officerswap", GameFunction::ShowOfficerSwap, DCSH::show_officerswap);
   parse_config_shortcut(config, parsed, "show_qtrials", GameFunction::ShowQTrials, DCSH::show_qtrials);
   parse_config_shortcut(config, parsed, "show_refinery", GameFunction::ShowRefinery, DCSH::show_refinery);
   parse_config_shortcut(config, parsed, "show_ships", GameFunction::ShowShips, DCSH::show_ships);
-  parse_config_shortcut(config, parsed, "show_shipconstruction", GameFunction::ShowShipConstruction, DCSH::show_shipconstruction);
+  parse_config_shortcut(config, parsed, "show_shipconstruction", GameFunction::ShowShipConstruction,
+                        DCSH::show_shipconstruction);
+  parse_config_shortcut(config, parsed, "show_shipswap", GameFunction::ShowShipSwap, DCSH::show_shipswap);
   parse_config_shortcut(config, parsed, "show_shields", GameFunction::ShowShields, DCSH::show_shields);
   parse_config_shortcut(config, parsed, "show_battlelogs", GameFunction::ShowBattlelogs, DCSH::show_battlelogs);
   parse_config_shortcut(config, parsed, "show_stationexterior", GameFunction::ShoWStationExterior,

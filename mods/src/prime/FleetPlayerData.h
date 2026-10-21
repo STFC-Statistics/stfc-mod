@@ -9,6 +9,8 @@
 
 #include <cstdint>
 
+struct Ship;
+
 enum class FleetState {
   Unknown                = 0,
   IdleInSpace            = 1,
@@ -43,10 +45,13 @@ public:
   __declspec(property(get = __get_CurrentState)) FleetState CurrentState;
   __declspec(property(get = __get_PreviousState)) FleetState PreviousState;
   __declspec(property(get = __get_Id)) uint64_t Id;
+  __declspec(property(get = __get_Index)) int Index;
   __declspec(property(get = __get_Hull)) HullSpec* Hull;
   __declspec(property(get = __get_Address)) void* Address;
   __declspec(property(get = __get_Level)) int64_t Level;
   __declspec(property(get = __get_HasShip)) bool HasShip;
+  __declspec(property(get = __get_HullId)) int64_t HullId;
+  __declspec(property(get = __get_Ship)) ::Ship* Ship;
 
 private:
   static IL2CppClassHelper& get_class_helper()
@@ -57,6 +62,13 @@ private:
   }
 
 public:
+  int __get_Index()
+  {
+    static auto property = get_class_helper().GetProperty("Index");
+    auto* value = property.Get<int>(this);
+    return value ? *value : -1;
+  }
+
   HullSpec* __get_Hull()
   {
     static auto field = get_class_helper().GetProperty("Hull");
@@ -98,6 +110,17 @@ public:
     static auto field = get_class_helper().GetProperty("HasShip");
     auto*      value  = field.Get<bool>(this);
     return value ? *value : false;
+  }
+  int64_t __get_HullId()
+  {
+    static auto property = get_class_helper().GetProperty("HullId");
+    auto*       value    = property.Get<int64_t>(this);
+    return value ? *value : 0;
+  }
+  ::Ship* __get_Ship()
+  {
+    static auto property = get_class_helper().GetProperty("Ship");
+    return property.GetRaw<struct Ship>(this);
   }
 
   int64_t GetLocaId()
