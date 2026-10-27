@@ -58,6 +58,7 @@ void InstallPinnedShipClickHooks();
 void InstallDoubleClickAssignShipHooks();
 void InstallInstantWarpConfirmationHooks();
 void InstallForbiddenTechConfirmationHooks();
+void InstallForbiddenTechShipNameHooks();
 void InstallRevealConfirmationHooks();
 void InstallAudioEventHooks();
 void InstallActionQueueRecovery();
@@ -133,7 +134,7 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
   spdlog::info("");
 #endif
 
-  spdlog::info("Please see https://github.com/netniv/stfc-mod for latest configuration help,");
+  spdlog::info("Please see https://github.com/STFC-Mod/mod for latest configuration help,");
   spdlog::info("examples and future releases, or visit the STFC Community Mod discord server");
   spdlog::info("at https://discord.gg/PrpHgs7Vjs");
   spdlog::info("");
@@ -186,6 +187,7 @@ __int64 il2cpp_init_hook(auto original, const char* domain_name)
       {"DoubleClickAssignShip", {InstallDoubleClickAssignShipHooks, &cfg.installDoubleClickAssignShipHooks}},
       {"InstantWarpConfirm", {InstallInstantWarpConfirmationHooks, &cfg.installInstantWarpConfirmationHooks}},
       {"MessageBoxConfirmations", {InstallForbiddenTechConfirmationHooks, &cfg.installForbiddenTechConfirmationHooks}},
+      {"ForbiddenTechShipName", {InstallForbiddenTechShipNameHooks, &cfg.installForbiddenTechShipNameHooks}},
       {"RevealConfirm", {InstallRevealConfirmationHooks, &cfg.installRevealConfirmationHooks}},
       {"AudioEvents", {InstallAudioEventHooks, &cfg.installAudioEventHooks}},
       {"ActionQueueRecovery", {InstallActionQueueRecovery, &cfg.installActionQueueRecoveryHooks}},

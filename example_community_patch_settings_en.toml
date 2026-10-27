@@ -15,7 +15,7 @@
 #   these to:
 #
 #       Discord : https://discord.gg/PrpHgs7Vjs
-#       GitHub  : https://github.com/netniV/stfc-mod
+#       GitHub  : https://github.com/STFC-Mod/mod
 #
 #   Today's configuration file is brought to you by the letter A and the number 2
 #
@@ -294,6 +294,7 @@ chattitledisplayhooks = true
 dailyfactionbulkclaimhooks = true
 doubleclickassignshiphooks = true
 forbiddentechconfirmhooks = true
+forbiddentechshipnamehooks = true
 freeresizehooks = true
 galacticanomalytimerhooks = true
 game_version = true
@@ -734,6 +735,9 @@ only_show_first_popup = false
 # Show the newest Haven help-history entries first.
 reverse_haven_history = true
 
+# Show the equipped ship below the Forbidden Tech header, including ships without a dock.
+forbidden_tech_ship_name = true
+
 # Subgroup: Auto Confirm
 # ----------------------
 
@@ -937,6 +941,9 @@ buildings = true
 # Do you want to sync Haven data?
 haven = true
 
+# Do you want to sync live fleet state (mining, docked, warping...)? Opt-in, off by default
+fleets = false
+
 # Do you want to sync inventory data?
 inventory = true
 
@@ -949,6 +956,10 @@ missions = true
 # Do you want to sync owned officer data?
 officers = true
 
+# Do you want to sync your own player profile (level, XP, Power, Haven unlocked)?
+# Only your own record is sent, never other players'.
+profile = false
+
 # Do you want to sync research data?
 research = true
 
@@ -960,6 +971,9 @@ ships = true
 
 # Do you want to sync slots data?
 slots = true
+
+# Do you want to sync faction store offer data?
+store_offers = false
 
 # Do you want to sync owned forbidden tech data?
 tech = true
