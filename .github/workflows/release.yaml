@@ -45,17 +45,37 @@ jobs:
           echo "Found successful Build run ID: $build_run_id"
           echo "build_run_id=$build_run_id" >> "$GITHUB_OUTPUT"
 
+      # Prefer the Azure Artifact Signing output when the CI run produced one;
+      # fall back to the unsigned build artifact otherwise.
+      - name: Resolve Windows artifact
+        id: windows_artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if gh api \
+              "/repos/${{ github.repository }}/actions/runs/${{ steps.check_build.outputs.build_run_id }}/artifacts?per_page=100" \
+              --jq '.artifacts[].name' \
+              | grep -qx "stfc-community-mod-signed"; then
+            echo "name=stfc-community-mod-signed" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=stfc-community-mod" >> "$GITHUB_OUTPUT"
+          fi
+
       # Download only release-facing CI artifacts.
       - name: Download Windows build
         uses: actions/download-artifact@v8
         with:
-          name: stfc-community-mod
+          name: ${{ steps.windows_artifact.outputs.name }}
           path: stfc-community-mod
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ steps.check_build.outputs.build_run_id }}
 
       - name: Download macOS universal archive
+        if: vars.SKIP_MACOS_BUILD != 'true'
         uses: actions/download-artifact@v8
         with:
           name: stfc-community-mod-macos-universal
@@ -65,6 +85,7 @@ jobs:
           run-id: ${{ steps.check_build.outputs.build_run_id }}
 
       - name: Download macOS installer
+        if: vars.SKIP_MACOS_BUILD != 'true'
         uses: actions/download-artifact@v8
         with:
           name: stfc-community-mod-installer
@@ -80,14 +101,16 @@ jobs:
 
           test -f stfc-community-mod/version.dll
 
-          test -f \
-            stfc-community-mod-macos-universal/stfc-community-mod-macos-universal.tar.zst
+          if [[ "${{ vars.SKIP_MACOS_BUILD }}" != "true" ]]; then
+            test -f \
+              stfc-community-mod-macos-universal/stfc-community-mod-macos-universal.tar.zst
 
-          test -f \
-            stfc-community-mod-macos-universal/stfc-community-mod-macos-universal.tar.zst.sha256
+            test -f \
+              stfc-community-mod-macos-universal/stfc-community-mod-macos-universal.tar.zst.sha256
 
-          test -f \
-            stfc-community-mod-installer/stfc-community-mod-installer.dmg
+            test -f \
+              stfc-community-mod-installer/stfc-community-mod-installer.dmg
+          fi
 
       # Legacy Windows ZIP.
       #
@@ -139,6 +162,32 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # macOS assets are only present when SKIP_MACOS_BUILD is not enabled on
+      # the repository.
+      - name: Resolve release assets
+        id: release_assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "stfc-community-mod.zip"
+            echo "stfc-community-mod-${{ github.ref_name }}.zip"
+            echo "stfc-community-mod-windows-x64/stfc-community-mod-windows-x64.tar.zst"
+            echo "stfc-community-mod-windows-x64/stfc-community-mod-windows-x64.tar.zst.sha256"
+            if [[ "${{ vars.SKIP_MACOS_BUILD }}" != "true" ]]; then
+              echo "stfc-community-mod-macos-universal/stfc-community-mod-macos-universal.tar.zst"
+              echo "stfc-community-mod-macos-universal/stfc-community-mod-macos-universal.tar.zst.sha256"
+              echo "stfc-community-mod-installer/stfc-community-mod-installer.dmg"
+            fi
+          } > .release-assets
+
+          {
+            echo "artifacts<<RELEASE_ASSETS_EOF"
+            cat .release-assets
+            echo "RELEASE_ASSETS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       # Create the release and upload every release asset in one action.
       - name: Create Release
         uses: ncipollo/release-action@v1
@@ -151,11 +200,4 @@ jobs:
 
           artifactErrorsFailBuild: true
 
-          artifacts: |
-            stfc-community-mod.zip
-            stfc-community-mod-${{ github.ref_name }}.zip
-            stfc-community-mod-windows-x64/stfc-community-mod-windows-x64.tar.zst
-            stfc-community-mod-windows-x64/stfc-community-mod-windows-x64.tar.zst.sha256
-            stfc-community-mod-macos-universal/stfc-community-mod-macos-universal.tar.zst
-            stfc-community-mod-macos-universal/stfc-community-mod-macos-universal.tar.zst.sha256
-            stfc-community-mod-installer/stfc-community-mod-installer.dmg
+          artifacts: ${{ steps.release_assets.outputs.artifacts }}

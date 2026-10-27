@@ -281,7 +281,7 @@ jobs:
     needs: build-win
     if: >-
       github.event_name == 'push' &&
-      github.repository == 'netniV/stfc-mod' &&
+      (github.repository == 'netniV/stfc-mod' || github.repository == 'STFC-Statistics/stfc-mod') &&
       github.ref_protected &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
     runs-on: windows-2025-vs2026
@@ -328,6 +328,54 @@ jobs:
           }
           Write-Host "Verified DLL provenance: $comments"
 
+      - name: Azure login
+        if: github.ref == 'refs/heads/main' && vars.AZURE_CODESIGN_ACCOUNT != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows DLL
+        if: github.ref == 'refs/heads/main' && vars.AZURE_CODESIGN_ACCOUNT != ''
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_CODESIGN_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CODESIGN_PROFILE }}
+          files: ${{ github.workspace }}/.artifacts/windows/version.dll
+          description: STFC Community Mod
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify Windows DLL signature
+        if: github.ref == 'refs/heads/main' && vars.AZURE_CODESIGN_ACCOUNT != ''
+        shell: pwsh
+        run: |
+          $dll = (Resolve-Path -LiteralPath '.artifacts/windows/version.dll').Path
+          $signature = Get-AuthenticodeSignature -FilePath $dll
+          if ($signature.Status -ne 'Valid') {
+            throw "Authenticode verification failed: $($signature.Status) - $($signature.StatusMessage)"
+          }
+          Write-Host "Verified signature: $($signature.SignerCertificate.Subject)"
+
+      - name: Upload signed Windows DLL
+        if: github.ref == 'refs/heads/main' && vars.AZURE_CODESIGN_ACCOUNT != ''
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: stfc-community-mod-signed
+          path: .artifacts/windows/version.dll
+          compression-level: 0
+          if-no-files-found: error
+
       - name: Attest Windows DLL
         uses: actions/attest@v4.2.1
         with:
@@ -335,6 +383,7 @@ jobs:
 
   build-mac:
     name: build-mac (${{ matrix.arch }})
+    if: vars.SKIP_MACOS_BUILD != 'true'
 
     strategy:
       fail-fast: false
@@ -670,6 +719,7 @@ jobs:
   package-mac:
     name: package-mac
     needs: build-mac
+    if: vars.SKIP_MACOS_BUILD != 'true'
     runs-on: macos-26
 
     steps:
