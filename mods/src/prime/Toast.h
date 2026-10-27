@@ -62,18 +62,21 @@ enum ToastState {
   DynamicCrisisFailed           = 56,
   DynamicCrisisCompleted        = 57,
   GalacticAnomalySystemEntered  = 58,
+  ChapterCompleted              = 59,
 };
 
 struct Toast {
 public:
   Il2CppArray* get_TextParameters()
   {
-    return *reinterpret_cast<Il2CppArray**>(reinterpret_cast<char*>(this) + 0x18);
+    static auto prop = get_class_helper().GetProperty("TextParameters");
+    return prop.GetRaw<Il2CppArray>(this);
   }
 
   void* get_TextLocaleTextContext()
   {
-    return *reinterpret_cast<void**>(reinterpret_cast<char*>(this) + 0x20);
+    static auto prop = get_class_helper().GetProperty("TextLocaleTextContext");
+    return prop.GetRaw(this);
   }
 
   Il2CppObject* get_Data()

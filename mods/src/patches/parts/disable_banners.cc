@@ -12,6 +12,10 @@ struct ToastObserver {
 
 void ToastObserver_EnqueueToast_Hook(auto original, ToastObserver *_this, Toast *toast)
 {
+  if (toast == nullptr) {
+    return original(_this, toast);
+  }
+
   notification_handle_toast(toast);
 
   if (std::ranges::find(Config::Get().disabled_banner_types, toast->get_State())
@@ -24,6 +28,10 @@ void ToastObserver_EnqueueToast_Hook(auto original, ToastObserver *_this, Toast 
 
 void ToastObserver_EnqueueOrCombineToast_Hook(auto original, ToastObserver *_this, Toast *toast, uintptr_t cmpAction)
 {
+  if (toast == nullptr) {
+    return original(_this, toast, cmpAction);
+  }
+
   notification_handle_toast(toast);
 
   if (std::ranges::find(Config::Get().disabled_banner_types, toast->get_State())
